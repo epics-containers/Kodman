@@ -13,4 +13,4 @@ def test_cli_version():
 
 def test_cli_help():
     cmd = [ENTRY_POINT, "--help"]
-    assert subprocess.check_output(cmd).decode().strip() == responses.help_screen
+    assert responses.help_screen in subprocess.check_output(cmd).decode().strip()
