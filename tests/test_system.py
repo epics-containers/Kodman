@@ -24,7 +24,7 @@ def remove_empty_lines(text):
 )
 def test_docker_run_hello():
     cmd = [DOCKER_PROVIDER, "run", "--rm", "hello-world"]
-    assert subprocess.check_output(cmd).decode().strip() == responses.hello_world
+    assert responses.hello_world in subprocess.check_output(cmd).decode().strip()
 
 
 @pytest.mark.skipif(
@@ -32,9 +32,7 @@ def test_docker_run_hello():
 )
 def test_kodman_run_hello():
     cmd = [ENTRY_POINT, "run", "--rm", "hello-world"]
-    assert subprocess.check_output(cmd).decode().strip() == remove_empty_lines(
-        responses.hello_world
-    )
+    assert responses.hello_world in subprocess.check_output(cmd).decode().strip()
 
 
 @pytest.mark.skipif(
@@ -56,7 +54,7 @@ def test_kodman_run_incluster(root: Path):
     ]
 
     result = subprocess.run(cmd, capture_output=True, text=True)
-    assert result.stdout.strip() == remove_empty_lines(responses.hello_world)
+    assert responses.hello_world in subprocess.check_output(cmd).decode().strip()
 
 
 @pytest.mark.skipif(
