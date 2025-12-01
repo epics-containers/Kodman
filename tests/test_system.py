@@ -53,7 +53,7 @@ def test_kodman_run_incluster(root: Path):
         pod_command,
     ]
 
-    result = subprocess.run(cmd, capture_output=True, text=True)
+    subprocess.run(cmd, capture_output=True, text=True)
     assert responses.hello_world in subprocess.check_output(cmd).decode().strip()
 
 
