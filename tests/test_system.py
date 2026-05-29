@@ -61,7 +61,7 @@ def test_kodman_run_incluster(root: Path):
     not KODMAN_SYSTEM_TESTING, reason="export KODMAN_SYSTEM_TESTING=true"
 )
 def test_docker_run_exitcodes():
-    ERROR_MSG = "My error message"
+    error_msg = "My error message"
     cmd = [
         DOCKER_PROVIDER,
         "run",
@@ -70,19 +70,19 @@ def test_docker_run_exitcodes():
         "--rm",
         "ubuntu",
         "-c",
-        f"echo '{ERROR_MSG}' >&2; exit 1",
+        f"echo '{error_msg}' >&2; exit 1",
     ]
 
     result = subprocess.run(cmd, capture_output=True, text=True)
     assert result.returncode == 1
-    assert result.stderr.strip() == ERROR_MSG
+    assert result.stderr.strip() == error_msg
 
 
 @pytest.mark.skipif(
     not KODMAN_SYSTEM_TESTING, reason="export KODMAN_SYSTEM_TESTING=true"
 )
 def test_kodman_run_exitcodes():
-    ERROR_MSG = "My error message"
+    error_msg = "My error message"
     cmd = [
         ENTRY_POINT,
         "run",
@@ -91,13 +91,13 @@ def test_kodman_run_exitcodes():
         "--rm",
         "ubuntu",
         "-c",
-        f"echo '{ERROR_MSG}' >&2; exit 1",
+        f"echo '{error_msg}' >&2; exit 1",
     ]
 
     result = subprocess.run(cmd, capture_output=True, text=True)
     assert result.returncode == 1
     assert (
-        result.stdout.strip() == ERROR_MSG
+        result.stdout.strip() == error_msg
     )  # K8s does not distinguish between stderr and stdout!
 
 
@@ -105,7 +105,7 @@ def test_kodman_run_exitcodes():
     not KODMAN_SYSTEM_TESTING, reason="export KODMAN_SYSTEM_TESTING=true"
 )
 def test_docker_run_mount_dir(data: Path):
-    FILE_MOUNT = "to_mount.txt"
+    file_mount = "to_mount.txt"
     cmd = [
         DOCKER_PROVIDER,
         "run",
@@ -115,7 +115,7 @@ def test_docker_run_mount_dir(data: Path):
         "ubuntu",
         "bash",
         "-c",
-        f"cat test/{FILE_MOUNT}",
+        f"cat test/{file_mount}",
     ]
     assert subprocess.check_output(cmd).decode().strip() == responses.mount
 
@@ -124,7 +124,7 @@ def test_docker_run_mount_dir(data: Path):
     not KODMAN_SYSTEM_TESTING, reason="export KODMAN_SYSTEM_TESTING=true"
 )
 def test_kodman_run_mount_dir(data: Path):
-    FILE_MOUNT = "to_mount.txt"
+    file_mount = "to_mount.txt"
     cmd = [
         ENTRY_POINT,
         "run",
@@ -134,25 +134,28 @@ def test_kodman_run_mount_dir(data: Path):
         "ubuntu",
         "bash",
         "-c",
-        f"cat test/{FILE_MOUNT}",
+        f"cat test/{file_mount}",
     ]
 
     assert subprocess.check_output(cmd).decode().strip() == responses.mount
 
 
+@pytest.mark.skipif(
+    not KODMAN_SYSTEM_TESTING, reason="export KODMAN_SYSTEM_TESTING=true"
+)
 def test_docker_run_mount_file(data: Path):
-    FILE_MOUNT = "to_mount.txt"
-    FILE_NEW = "to_read.txt"
+    file_mount = "to_mount.txt"
+    file_new = "to_read.txt"
     cmd = [
         DOCKER_PROVIDER,
         "run",
         "-v",
-        f"{data}/{FILE_MOUNT}:/test/{FILE_NEW}",
+        f"{data}/{file_mount}:/test/{file_new}",
         "--rm",
         "ubuntu",
         "bash",
         "-c",
-        f"cat test/{FILE_NEW}",
+        f"cat test/{file_new}",
     ]
 
     assert subprocess.check_output(cmd).decode().strip() == responses.mount
@@ -162,18 +165,18 @@ def test_docker_run_mount_file(data: Path):
     not KODMAN_SYSTEM_TESTING, reason="export KODMAN_SYSTEM_TESTING=true"
 )
 def test_kodman_run_mount_file(data: Path):
-    FILE_MOUNT = "to_mount.txt"
-    FILE_NEW = "to_read.txt"
+    file_mount = "to_mount.txt"
+    file_new = "to_read.txt"
     cmd = [
         ENTRY_POINT,
         "run",
         "-v",
-        f"{data}/{FILE_MOUNT}:/test/{FILE_NEW}",
+        f"{data}/{file_mount}:/test/{file_new}",
         "--rm",
         "ubuntu",
         "bash",
         "-c",
-        f"cat test/{FILE_NEW}",
+        f"cat test/{file_new}",
     ]
 
     assert subprocess.check_output(cmd).decode().strip() == responses.mount
@@ -183,18 +186,18 @@ def test_kodman_run_mount_file(data: Path):
     not KODMAN_SYSTEM_TESTING, reason="export KODMAN_SYSTEM_TESTING=true"
 )
 def test_kodman_run_mount_root(data: Path):
-    FILE_MOUNT = "to_mount.txt"
-    FILE_NEW = "to_read.txt"
+    file_mount = "to_mount.txt"
+    file_new = "to_read.txt"
     cmd = [
         ENTRY_POINT,
         "run",
         "-v",
-        f"{data}/{FILE_MOUNT}:/{FILE_NEW}",
+        f"{data}/{file_mount}:/{file_new}",
         "--rm",
         "ubuntu",
         "bash",
         "-c",
-        f"cat test/{FILE_NEW}",
+        f"cat test/{file_new}",
     ]
 
     result = subprocess.run(cmd, capture_output=True, text=True)

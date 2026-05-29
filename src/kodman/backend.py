@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import Any
 
 from kubernetes import client, config, watch
+from kubernetes.client.models.core_v1_event_list import CoreV1EventList
 from kubernetes.client.models.v1_pod import V1Pod
 from kubernetes.client.rest import ApiException
 from kubernetes.stream import stream
@@ -299,7 +300,9 @@ class Backend:
                     namespace=namespace,
                     field_selector=f"involvedObject.name={unique_pod_name}",
                 )
-                for event in events.items:
+                if not isinstance(events, CoreV1EventList):  # Runtime type checking
+                    raise TypeError("Unexpected response type")
+                for event in events.items or []:
                     if event.type == "Warning":
                         self.return_code = 1
                         reason = event.type

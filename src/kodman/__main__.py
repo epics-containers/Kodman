@@ -5,7 +5,7 @@ from .backend import Backend, DeleteOptions, RunOptions
 from .engine import ArgparseEngine, Command
 
 
-class kodmanEngine(ArgparseEngine):
+class KodmanEngine(ArgparseEngine):
     def __init__(self):
         if debug := self.get_env("KODMAN_DEBUG", bool):
             super().__init__(debug=debug)
@@ -22,7 +22,7 @@ class kodmanEngine(ArgparseEngine):
         self._ctx = Backend(self._log)
 
 
-engine = kodmanEngine()
+engine = KodmanEngine()
 
 
 @engine.add_command
