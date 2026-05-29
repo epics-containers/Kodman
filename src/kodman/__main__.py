@@ -53,7 +53,6 @@ class Run(Command):
     def do(self, args, ctx, env, log):
         ctx.connect()
         log.debug(f"Image: {args.image}")
-        pod_name = ""
         k8s_command = []
         k8s_args = []
         if args.entrypoint:
@@ -75,10 +74,15 @@ class Run(Command):
             service_account=service_a if service_a else "",
         )
 
-        pod_name = ctx.run(options)
-        self.exit_code = ctx.return_code
-        if args.rm:
-            ctx.delete(DeleteOptions(pod_name))
+        try:
+            ctx.run(options)
+            self.exit_code = ctx.return_code
+        finally:
+            # Clean up even when run() raised part way through, otherwise a
+            # half-launched pod is left behind to be restarted/alerted on.
+            # ctx.pod_name is set by run() as soon as the name is known.
+            if args.rm and ctx.pod_name:
+                ctx.delete(DeleteOptions(ctx.pod_name))
 
 
 @engine.add_command

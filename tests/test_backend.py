@@ -1,4 +1,41 @@
-from kodman.backend import _iter_log_lines
+import logging
+
+from kodman.backend import RunOptions, _iter_log_lines, build_pod_manifest
+
+_log = logging.getLogger("test")
+
+
+def test_build_pod_manifest_sets_restart_policy_never():
+    # A one-shot run pod must not be restarted on exit/failure, otherwise a
+    # failed launch CrashLoopBackOffs and spams alerts.
+    _, manifest, _ = build_pod_manifest(RunOptions(image="busybox"), _log)
+    assert manifest["spec"]["restartPolicy"] == "Never"
+
+
+def test_build_pod_manifest_basic_structure():
+    _, manifest, volumes = build_pod_manifest(RunOptions(image="alpine"), _log)
+    assert manifest["kind"] == "Pod"
+    container = manifest["spec"]["containers"][0]
+    assert container["image"] == "alpine"
+    assert container["name"] == "kodman-exec"
+    assert "command" not in container  # not requested
+    assert volumes == []
+
+
+def test_build_pod_manifest_applies_command_args_and_sa():
+    _, manifest, _ = build_pod_manifest(
+        RunOptions(
+            image="alpine",
+            command=["bash"],
+            args=["-c", "echo hi"],
+            service_account="runner",
+        ),
+        _log,
+    )
+    container = manifest["spec"]["containers"][0]
+    assert container["command"] == ["bash"]
+    assert container["args"] == ["-c", "echo hi"]
+    assert manifest["spec"]["serviceAccountName"] == "runner"
 
 
 class FakeStreamResponse:
