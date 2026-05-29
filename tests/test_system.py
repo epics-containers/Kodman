@@ -39,10 +39,19 @@ def test_kodman_run_hello():
     not KODMAN_SYSTEM_TESTING, reason="export KODMAN_SYSTEM_TESTING=true"
 )
 def test_kodman_run_incluster(root: Path):
+    # The repo is bind-mounted into the pod with the host's uid while the
+    # container runs as root, so git refuses to introspect it ("detected
+    # dubious ownership") and setuptools_scm can't derive a version, failing
+    # the build. Mark the mount safe before installing.
+    #
     # Don't suppress pip output: when this fails it is almost always the build
     # inside the pod, and the kodman-streamed pod logs are the only diagnostic
     # we get back from CI.
-    pod_command = "pip install /kodman && kodman run --rm hello-world"
+    pod_command = (
+        "git config --global --add safe.directory /kodman"
+        " && pip install /kodman"
+        " && kodman run --rm hello-world"
+    )
     cmd = [
         ENTRY_POINT,
         "run",
