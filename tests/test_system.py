@@ -1,3 +1,4 @@
+import json
 import os
 import subprocess
 import sys
@@ -280,3 +281,66 @@ def test_kodman_fail_command(data: Path):
     result = subprocess.run(cmd, capture_output=True, text=True)
     assert result.returncode == 1
     assert responses.failed_command in result.stderr
+
+
+def _kodman_pod_names() -> set[str]:
+    out = subprocess.check_output(["kubectl", "get", "pods", "-o", "json"]).decode()
+    pods = json.loads(out)["items"]
+    return {
+        p["metadata"]["name"]
+        for p in pods
+        if p["metadata"]["name"].startswith("kodman-run-")
+    }
+
+
+@pytest.mark.skipif(
+    not KODMAN_SYSTEM_TESTING, reason="export KODMAN_SYSTEM_TESTING=true"
+)
+def test_kodman_failed_pod_does_not_restart():
+    """Regression for the boot-loop bug.
+
+    A failed run-to-completion pod must settle in phase ``Failed`` with zero
+    restarts. Before the fix the pod inherited the Pod default
+    ``restartPolicy=Always``, so a failed container was restarted indefinitely
+    (CrashLoopBackOff) and spammed alerts. We omit ``--rm`` so the pod survives
+    for inspection, then delete it ourselves.
+    """
+    before = _kodman_pod_names()
+    cmd = [
+        ENTRY_POINT,
+        "run",
+        "--entrypoint",
+        "bash",
+        "ubuntu",
+        "-c",
+        "echo boom; exit 7",
+    ]
+    result = subprocess.run(cmd, capture_output=True, text=True)
+    # Exit code is propagated even though the pod is left behind.
+    assert result.returncode == 7, (
+        f"exit={result.returncode}\n"
+        f"--- stdout ---\n{result.stdout}\n"
+        f"--- stderr ---\n{result.stderr}"
+    )
+
+    new_pods = _kodman_pod_names() - before
+    assert len(new_pods) == 1, f"expected one new pod, got {new_pods}"
+    pod_name = new_pods.pop()
+
+    try:
+        pod = json.loads(
+            subprocess.check_output(
+                ["kubectl", "get", "pod", pod_name, "-o", "json"]
+            ).decode()
+        )
+        assert pod["spec"]["restartPolicy"] == "Never"
+        assert pod["status"]["phase"] == "Failed", pod["status"]
+        exec_status = next(
+            c for c in pod["status"]["containerStatuses"] if c["name"] == "kodman-exec"
+        )
+        assert exec_status["restartCount"] == 0, exec_status
+    finally:
+        subprocess.run(
+            ["kubectl", "delete", "pod", pod_name, "--ignore-not-found"],
+            check=False,
+        )

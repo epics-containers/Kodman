@@ -51,6 +51,114 @@ class DeleteOptions:
     name: str
 
 
+INIT_CONTAINER_NAME = "wait-for-signal"
+
+
+def build_pod_manifest(
+    options: RunOptions, log: logging.Logger
+) -> tuple[str, dict[str, Any], list[dict[str, Path]]]:
+    """Build the one-shot pod manifest for a ``kodman run``.
+
+    Returns ``(unique_pod_name, pod_manifest, volumes)`` where ``volumes`` is
+    the cache of ``{"src", "dst"}`` mappings the caller later streams into the
+    init container with :func:`cp_k8s`.
+
+    ``restartPolicy`` is forced to ``"Never"``. kodman pods are run-to-completion
+    (docker-``run`` style), but the Pod default is ``restartPolicy=Always``, so a
+    failed launch would be restarted indefinitely by the kubelet — a
+    CrashLoopBackOff that boot-loops and spams alerts.
+    """
+    unique_pod_name = f"kodman-run-{hash(options)}"
+    pod_manifest: dict[str, Any] = {
+        "apiVersion": "v1",
+        "kind": "Pod",
+        "metadata": {
+            "name": unique_pod_name,
+        },
+        "spec": {
+            "restartPolicy": "Never",
+            "initContainers": [
+                {
+                    "name": INIT_CONTAINER_NAME,
+                    "image": "busybox",
+                    "command": [
+                        "sh",
+                        "-c",
+                        "until [ -f /tmp/trigger ];"
+                        'do echo "Waiting for trigger...";'
+                        "sleep 1;"
+                        "done;"
+                        'echo "Trigger file found!"',
+                    ],
+                    "volumeMounts": [],
+                },
+            ],
+            "containers": [
+                {
+                    "image": options.image,
+                    "name": "kodman-exec",
+                    "volumeMounts": [],
+                }
+            ],
+            "volumes": [],
+        },
+    }
+
+    if options.command:
+        container = pod_manifest["spec"]["containers"][0]
+        container["command"] = options.command
+
+    if options.args:
+        pod_manifest["spec"]["containers"][0]["args"] = options.args
+
+    if options.service_account:
+        log.debug(f"Using serviceAccountNam: '{options.service_account}'")
+        pod_manifest["spec"]["serviceAccountName"] = options.service_account
+
+    volumes: list[dict[str, Path]] = []
+    if options.volumes:
+        for i, options_volume in enumerate(options.volumes):
+            process = options_volume.split(":")
+            src = Path(process[0]).resolve()
+            if not src.exists():
+                raise FileNotFoundError(f"{src} does not exist")
+            dst = src  # In case no dst, set same as src
+            try:
+                dst = Path(process[1])
+            except IndexError:
+                pass
+            if not dst.is_absolute():
+                raise ValueError("Destination path must be absolute")
+            log.info(f"Mount: {src} to {dst}")
+            if src.is_dir():
+                log.debug(f"Volume target {src} is a directory")
+                dst_mount = dst
+            else:
+                log.debug(f"Volume target {src} is a file")
+                dst_mount = dst.parent
+                if dst_mount == Path("/"):
+                    raise NotImplementedError(
+                        "Root mounting of files not supported by k8s 'emptyDir'"
+                    )
+
+            volumes.append({"src": src, "dst": dst})  # cache for later
+
+            pod_manifest["spec"]["initContainers"][0]["volumeMounts"].append(
+                {"name": f"shared-data-{i}", "mountPath": str(dst_mount)}
+            )
+            pod_manifest["spec"]["containers"][0]["volumeMounts"].append(
+                {"name": f"shared-data-{i}", "mountPath": str(dst_mount)}
+            )
+            pod_manifest["spec"]["volumes"].append(
+                {
+                    "name": f"shared-data-{i}",
+                    "emptyDir": {},
+                }
+            )
+
+    return unique_pod_name, pod_manifest, volumes
+
+
 def _iter_log_lines(resp):
     """Yield decoded log lines from a streamed (``_preload_content=False``)
     read_namespaced_pod_log response.
@@ -140,6 +248,10 @@ def get_incluster_context():
 class Backend:
     def __init__(self, log):
         self.return_code = 0
+        # Name of the pod created by the most recent run(). Set as early as
+        # possible so callers can still clean up (e.g. `--rm`) when run()
+        # raises part way through.
+        self.pod_name = ""
         self._log = log
         self._polling_freq = 1
         self._grace_period = 2  # Is this too aggressive?
@@ -167,94 +279,11 @@ class Backend:
         self._log.debug(f"  User: {self._context['user']}")
 
     def run(self, options: RunOptions) -> str:
-        unique_pod_name = f"kodman-run-{hash(options)}"
-        init_container_name = "wait-for-signal"
         namespace = self._context["namespace"]
-        pod_manifest: dict[str, Any] = {
-            "apiVersion": "v1",
-            "kind": "Pod",
-            "metadata": {
-                "name": unique_pod_name,
-            },
-            "spec": {
-                "initContainers": [
-                    {
-                        "name": init_container_name,
-                        "image": "busybox",
-                        "command": [
-                            "sh",
-                            "-c",
-                            "until [ -f /tmp/trigger ];"
-                            'do echo "Waiting for trigger...";'
-                            "sleep 1;"
-                            "done;"
-                            'echo "Trigger file found!"',
-                        ],
-                        "volumeMounts": [],
-                    },
-                ],
-                "containers": [
-                    {
-                        "image": options.image,
-                        "name": "kodman-exec",
-                        "volumeMounts": [],
-                    }
-                ],
-                "volumes": [],
-            },
-        }
-
-        if options.command:
-            container = pod_manifest["spec"]["containers"][0]
-            container["command"] = options.command
-
-        if options.args:
-            pod_manifest["spec"]["containers"][0]["args"] = options.args
-
-        if options.service_account:
-            self._log.debug(f"Using serviceAccountNam: '{options.service_account}'")
-            pod_manifest["spec"]["serviceAccountName"] = options.service_account
-
-        volumes: list[dict[str, Path]] = []
-        if options.volumes:
-            for i, options_volume in enumerate(options.volumes):
-                process = options_volume.split(":")
-                src = Path(process[0]).resolve()
-                if not src.exists():
-                    raise FileNotFoundError(f"{src} does not exist")
-                dst = src  # In case no dst, set same as src
-                try:
-                    dst = Path(process[1])
-                except IndexError:
-                    pass
-                if not dst.is_absolute():
-                    raise ValueError("Destination path must be absolute")
-                self._log.info(f"Mount: {src} to {dst}")
-                if src.is_dir():
-                    self._log.debug(f"Volume target {src} is a directory")
-                    dst_mount = dst
-                else:
-                    self._log.debug(f"Volume target {src} is a file")
-                    dst_mount = dst.parent
-                    if dst_mount == Path("/"):
-                        raise NotImplementedError(
-                            "Root mounting of files not supported by k8s 'emptyDir'"
-                        )
-
-                volumes.append({"src": src, "dst": dst})  # cache for later
-
-                pod_manifest["spec"]["initContainers"][0]["volumeMounts"].append(
-                    {"name": f"shared-data-{i}", "mountPath": str(dst_mount)}
-                )
-                pod_manifest["spec"]["containers"][0]["volumeMounts"].append(
-                    {"name": f"shared-data-{i}", "mountPath": str(dst_mount)}
-                )
-                pod_manifest["spec"]["volumes"].append(
-                    {
-                        "name": f"shared-data-{i}",
-                        "emptyDir": {},
-                    }
-                )
+        unique_pod_name, pod_manifest, volumes = build_pod_manifest(options, self._log)
+        init_container_name = INIT_CONTAINER_NAME
+        # Record the name immediately so a failed run() is still cleanable.
+        self.pod_name = unique_pod_name
 
         self._log.debug(f"Pod manifest = {pod_manifest}")
 
