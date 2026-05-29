@@ -5,12 +5,14 @@ import tarfile
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
-from kubernetes import client, config, watch
+from kubernetes import client, config
+from kubernetes.client.models.core_v1_event_list import CoreV1EventList
 from kubernetes.client.models.v1_pod import V1Pod
 from kubernetes.client.rest import ApiException
 from kubernetes.stream import stream
+from urllib3 import HTTPResponse
 
 
 @dataclass(frozen=True)
@@ -47,6 +49,32 @@ class RunOptions:
 @dataclass(frozen=True)
 class DeleteOptions:
     name: str
+
+
+def _iter_log_lines(resp):
+    """Yield decoded log lines from a streamed (``_preload_content=False``)
+    read_namespaced_pod_log response.
+
+    Mirrors the newline-splitting behaviour of kubernetes.watch's internal
+    iterator so output matches the previous Watch-based implementation, while
+    sidestepping the version-fragile follow/watch argument detection (issue
+    #51).
+    """
+    buffer = bytearray()
+    for segment in resp.stream(amt=None, decode_content=False):
+        if isinstance(segment, str):
+            segment = segment.encode("utf-8")
+        buffer.extend(segment)
+
+        next_newline = buffer.find(b"\n")
+        while next_newline != -1:
+            line = buffer[:next_newline].decode("utf-8", errors="replace")
+            del buffer[: next_newline + 1]
+            yield line
+            next_newline = buffer.find(b"\n")
+
+    if buffer:  # Trailing data with no final newline
+        yield buffer.decode("utf-8", errors="replace")
 
 
 def cp_k8s(
@@ -299,7 +327,9 @@ class Backend:
                     namespace=namespace,
                     field_selector=f"involvedObject.name={unique_pod_name}",
                 )
-                for event in events.items:
+                if not isinstance(events, CoreV1EventList):  # Runtime type checking
+                    raise TypeError("Unexpected response type")
+                for event in events.items or []:
                     if event.type == "Warning":
                         self.return_code = 1
                         reason = event.type
@@ -310,18 +340,35 @@ class Backend:
             else:
                 raise TypeError("Unexpected response type")
 
-        # Attach to pod logging
+        # Attach to pod logging.
+        #
+        # We deliberately do not use kubernetes.watch.Watch here. Watch.stream
+        # inspects the API method's docstring to decide whether to pass
+        # follow=True or watch=True, and as of the kubernetes 36.x client the
+        # docstring format for read_namespaced_pod_log changed so that
+        # detection fails and an invalid watch=True is sent, raising
+        # ApiTypeError (see issue #51). Streaming the log directly avoids that
+        # fragility entirely.
         self._log.info("Try attach to pod logs")
-        w = watch.Watch()
-        for e in w.stream(
-            self._client.read_namespaced_pod_log,
-            name=unique_pod_name,
-            namespace=namespace,
-            follow=True,
-        ):
-            print(e)
+        # With _preload_content=False the client returns the raw urllib3
+        # response, but the generated stubs still type it as the deserialized
+        # body, so narrow it here.
+        resp = cast(
+            HTTPResponse,
+            self._client.read_namespaced_pod_log(
+                name=unique_pod_name,
+                namespace=namespace,
+                follow=True,
+                _preload_content=False,
+            ),
+        )
+        try:
+            for line in _iter_log_lines(resp):
+                print(line)
+        finally:
+            resp.close()
+            resp.release_conn()
         self._log.info("Execution complete")
-        w.stop()
 
         # Check exit codes
         final_pod = self._client.read_namespaced_pod(

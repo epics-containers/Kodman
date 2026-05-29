@@ -9,8 +9,9 @@ A command-line tool that provides a Docker-like experience with a Kubernetes bac
 
 An example use case would be to facilitate a single CI script where the runner may sometimes be a host with Docker (possibly run locally) and other times a Kubernetes executor where Docker-in-Docker is not possible (such as a Gitlab runner).
 
-Source          | <https://github.com/epics-containers/Kodman>
+What            | Where
 :---:           | :---:
+Source          | <https://github.com/epics-containers/Kodman>
 PyPI            | `pip install kodman`
 Releases        | <https://github.com/epics-containers/Kodman/releases>
 
