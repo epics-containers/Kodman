@@ -39,7 +39,10 @@ def test_kodman_run_hello():
     not KODMAN_SYSTEM_TESTING, reason="export KODMAN_SYSTEM_TESTING=true"
 )
 def test_kodman_run_incluster(root: Path):
-    pod_command = "pip install /kodman > /dev/null 2>&1 && kodman run --rm hello-world"
+    # Don't suppress pip output: when this fails it is almost always the build
+    # inside the pod, and the kodman-streamed pod logs are the only diagnostic
+    # we get back from CI.
+    pod_command = "pip install /kodman && kodman run --rm hello-world"
     cmd = [
         ENTRY_POINT,
         "run",
@@ -53,8 +56,14 @@ def test_kodman_run_incluster(root: Path):
         pod_command,
     ]
 
-    subprocess.run(cmd, capture_output=True, text=True)
-    assert responses.hello_world in subprocess.check_output(cmd).decode().strip()
+    result = subprocess.run(cmd, capture_output=True, text=True)
+    # Surface the inner pod logs on failure; check_output would hide them inside
+    # CalledProcessError.output, which pytest does not print.
+    assert responses.hello_world in result.stdout, (
+        f"exit={result.returncode}\n"
+        f"--- stdout ---\n{result.stdout}\n"
+        f"--- stderr ---\n{result.stderr}"
+    )
 
 
 @pytest.mark.skipif(

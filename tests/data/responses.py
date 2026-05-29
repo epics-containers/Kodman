@@ -6,4 +6,6 @@ mount = "test data"
 
 failed_image = "Failed to pull image"
 
-failed_command = 'exec: "bash": executable file not found in $PATH: unknown'
+# Trailing wording after "$PATH" varies by container runtime (podman appends
+# ": unknown", docker/runc does not), so match only the stable core message.
+failed_command = 'exec: "bash": executable file not found in $PATH'
