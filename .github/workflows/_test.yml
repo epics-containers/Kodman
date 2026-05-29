@@ -37,27 +37,6 @@ jobs:
       - run: kubectl apply -f .github/manifests
       - run: kubectl auth can-i --as=system:serviceaccount:default:default create pods -n default
 
-      - if: inputs.python-version == 'dev'
-        name: Install dev versions of python packages
-        uses: ./.github/actions/install_requirements
-
-      - if: inputs.python-version == 'dev'
-        name: Write the requirements as an artifact
-        run: pip freeze --exclude-editable > /tmp/dev-requirements.txt
-
-      - if: inputs.python-version == 'dev'
-        name: Upload dev-requirements.txt
-        uses: actions/upload-artifact@v4
-        with:
-          name: dev-requirements  s
-          path: /tmp/dev-requirements.txt
-
-      - if: inputs.python-version != 'dev'
-        name: Install latest versions of python packages
-        uses: ./.github/actions/install_requirements
-        with:
-          python-version: ${{ inputs.python-version }}
-          pip-install: ".[dev]"
       - name: Install uv
         uses: astral-sh/setup-uv@v7
 
