@@ -1,5 +1,5 @@
 # Changes here will be overwritten by Copier
-_commit: 2.6.0
+_commit: 5.1.0
 _src_path: gh:DiamondLightSource/python-copier-template
 author_email: marcell.nagy@diamond.ac.uk
 author_name: Marcell Nagy
@@ -13,4 +13,5 @@ github_org: epics-containers
 package_name: kodman
 pypi: true
 repo_name: Kodman
+strict_typing: false
 type_checker: pyright
