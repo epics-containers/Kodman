@@ -38,6 +38,19 @@ def test_build_pod_manifest_applies_command_args_and_sa():
     assert manifest["spec"]["serviceAccountName"] == "runner"
 
 
+def test_build_pod_manifest_sets_cpu_when_asked():
+    _, manifest, _ = build_pod_manifest(RunOptions(image="alpine", cpus="4"), _log)
+    resources = manifest["spec"]["containers"][0]["resources"]
+    # requested as well as limited: a request left to a namespace default can
+    # be a fraction of the limit, and the container is then throttled
+    assert resources == {"requests": {"cpu": "4"}, "limits": {"cpu": "4"}}
+
+
+def test_build_pod_manifest_leaves_cpu_to_the_cluster_by_default():
+    _, manifest, _ = build_pod_manifest(RunOptions(image="alpine"), _log)
+    assert "resources" not in manifest["spec"]["containers"][0]
+
+
 class FakeStreamResponse:
     """Mimics the urllib3 response returned by read_namespaced_pod_log when
     _preload_content=False: .stream() yields arbitrary byte chunks."""

@@ -34,6 +34,14 @@ echo "Mellon" > demo/token.txt
 kodman run -v ./demo:/demo --rm ubuntu bash -c "cat demo/token.txt"
 ```
 
+Ask for CPU, for work that needs more than the namespace hands out by default:
+```
+kodman run --cpus 4 --rm ubuntu nproc
+```
+Note that `nproc` still answers with the node's core count - a container is
+shown every core whether or not it may use them - so a build parallelised from
+that number will oversubscribe whatever `--cpus` allows.
+
 ## Usage:
 
 From outside of the cluster `kodman` will use your current Kubernetes context (the same as your current `kubectl` context).

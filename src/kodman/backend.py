@@ -22,6 +22,7 @@ class RunOptions:
     args: list[str] = field(default_factory=lambda: [])
     volumes: list[str] = field(default_factory=lambda: [])
     service_account: str = field(default_factory=lambda: "")
+    cpus: str = field(default_factory=lambda: "")
 
     def __hash__(self):
         hash_candidates = (
@@ -114,6 +115,18 @@ def build_pod_manifest(
     if options.service_account:
         log.debug(f"Using serviceAccountNam: '{options.service_account}'")
         pod_manifest["spec"]["serviceAccountName"] = options.service_account
+
+    if options.cpus:
+        # docker's --cpus is a ceiling on how much CPU the container may use,
+        # which k8s spells limits.cpu. Requesting the same amount rather than
+        # leaving the request to a LimitRange default keeps the pod off the
+        # throttle for work it has been promised, and makes it cost the
+        # cluster what it can actually use.
+        log.debug(f"Requesting cpu: '{options.cpus}'")
+        pod_manifest["spec"]["containers"][0]["resources"] = {
+            "requests": {"cpu": options.cpus},
+            "limits": {"cpu": options.cpus},
+        }
 
     volumes: list[dict[str, Path]] = []
     if options.volumes:

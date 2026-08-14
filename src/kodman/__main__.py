@@ -46,6 +46,13 @@ class Run(Command):
             action="append",
             help="Bind mount a volume into the container",
         )
+        parser_run.add_argument(
+            "--cpus",
+            type=str,
+            help="CPU the container may use, e.g. 4 or 500m. Without this the "
+            "pod takes whatever the namespace defaults to - often far less "
+            "than the node has, while the container still sees every core",
+        )
         parser_run.add_argument("image")
         parser_run.add_argument("command", nargs="?")
         parser_run.add_argument("args", nargs=argparse.REMAINDER, default=[])
@@ -72,6 +79,7 @@ class Run(Command):
             args=k8s_args,
             volumes=args.volume,
             service_account=service_a if service_a else "",
+            cpus=args.cpus if args.cpus else "",
         )
 
         try:
