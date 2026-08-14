@@ -4,12 +4,14 @@ import sys
 import tarfile
 import time
 from dataclasses import dataclass, field
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, cast
 
 from kubernetes import client, config
 from kubernetes.client.models.core_v1_event_list import CoreV1EventList
 from kubernetes.client.models.v1_pod import V1Pod
+from kubernetes.client.models.v1_pod_list import V1PodList
 from kubernetes.client.rest import ApiException
 from kubernetes.stream import stream
 from urllib3 import HTTPResponse
@@ -22,6 +24,7 @@ class RunOptions:
     args: list[str] = field(default_factory=lambda: [])
     volumes: list[str] = field(default_factory=lambda: [])
     service_account: str = field(default_factory=lambda: "")
+    cpus: str = field(default_factory=lambda: "")
 
     def __hash__(self):
         hash_candidates = (
@@ -51,7 +54,29 @@ class DeleteOptions:
     name: str
 
 
+@dataclass(frozen=True)
+class SweepOptions:
+    ttl_seconds: int
+
+
 INIT_CONTAINER_NAME = "wait-for-signal"
+
+# Marks every pod kodman creates, so a later run can find the ones an earlier
+# run left behind. Pods made before this label existed are invisible to the
+# sweep and have to be deleted by hand.
+MANAGED_BY_LABEL = "app.kubernetes.io/managed-by"
+MANAGED_BY_VALUE = "kodman"
+MANAGED_BY_SELECTOR = f"{MANAGED_BY_LABEL}={MANAGED_BY_VALUE}"
+
+# Phases in which a pod is finished with: nothing is running, nothing will run
+# again (restartPolicy is Never), and no kodman is still attached to its logs.
+# Anything else may belong to a run happening right now, so is never touched.
+TERMINAL_PHASES = ("Succeeded", "Failed")
+
+# How long a finished pod is kept for post-mortem inspection before the next
+# run reaps it. Without --rm a pod otherwise lives forever: a bare Pod has no
+# equivalent of a Job's ttlSecondsAfterFinished.
+DEFAULT_POD_TTL_SECONDS = 3600
 
 
 def build_pod_manifest(
@@ -62,6 +87,9 @@ def build_pod_manifest(
     Returns ``(unique_pod_name, pod_manifest, volumes)`` where ``volumes`` is
     the cache of ``{"src", "dst"}`` mappings the caller later streams into the
     init container with :func:`cp_k8s`.
+
+    The pod is labelled ``app.kubernetes.io/managed-by=kodman`` so that
+    :meth:`Backend.sweep` can find and reap it once it is finished with.
 
     ``restartPolicy`` is forced to ``"Never"``. kodman pods are run-to-completion
     (docker-``run`` style), but the Pod default is ``restartPolicy=Always``, so a
@@ -74,6 +102,7 @@ def build_pod_manifest(
         "kind": "Pod",
         "metadata": {
             "name": unique_pod_name,
+            "labels": {MANAGED_BY_LABEL: MANAGED_BY_VALUE},
         },
         "spec": {
             "restartPolicy": "Never",
@@ -114,6 +143,18 @@ def build_pod_manifest(
     if options.service_account:
         log.debug(f"Using serviceAccountNam: '{options.service_account}'")
         pod_manifest["spec"]["serviceAccountName"] = options.service_account
+
+    if options.cpus:
+        # docker's --cpus is a ceiling on how much CPU the container may use,
+        # which k8s spells limits.cpu. Requesting the same amount rather than
+        # leaving the request to a LimitRange default keeps the pod off the
+        # throttle for work it has been promised, and makes it cost the
+        # cluster what it can actually use.
+        log.debug(f"Requesting cpu: '{options.cpus}'")
+        pod_manifest["spec"]["containers"][0]["resources"] = {
+            "requests": {"cpu": options.cpus},
+            "limits": {"cpu": options.cpus},
+        }
 
     volumes: list[dict[str, Path]] = []
     if options.volumes:
@@ -277,6 +318,72 @@ class Backend:
         self._log.debug(f"  Cluster: {self._context['cluster']}")
         self._log.debug(f"  Namespace: {self._context['namespace']}")
         self._log.debug(f"  User: {self._context['user']}")
+
+    def sweep(self, options: SweepOptions) -> list[str]:
+        """Delete finished kodman pods left behind by earlier runs.
+
+        A pod outlives the kodman that created it whenever ``--rm`` was not
+        given, or the client was killed before it could clean up. Nothing in
+        Kubernetes collects a bare Pod, so they accumulate in the namespace
+        until somebody notices. Each run therefore reaps the leftovers of the
+        runs before it.
+
+        Only pods in a terminal phase older than ``ttl_seconds`` are removed:
+        a Pending or Running pod may belong to a kodman running right now.
+        A negative ttl disables the sweep. Returns the names deleted.
+
+        Failure here is never fatal - a namespace we cannot list or delete in
+        is a reason to warn and get on with the run, not to abandon it.
+        """
+        if options.ttl_seconds < 0:
+            self._log.debug("Pod sweep disabled")
+            return []
+
+        namespace = self._context["namespace"]
+        try:
+            pod_list = self._client.list_namespaced_pod(
+                namespace=namespace,
+                label_selector=MANAGED_BY_SELECTOR,
+            )
+        except ApiException as e:
+            self._log.warning(f"Could not list pods to sweep: {e}")
+            return []
+        if not isinstance(pod_list, V1PodList):  # Runtime type checking
+            # Warn rather than raise: a client whose response type moved under
+            # us must not take down every run, which is how the pod log stream
+            # broke on kubernetes 36.x (issue #51).
+            self._log.warning(f"Unexpected response type to sweep: {type(pod_list)}")
+            return []
+
+        now = datetime.now(UTC)
+        deleted = []
+        for pod in pod_list.items or []:
+            name = pod.metadata.name if pod.metadata else None
+            phase = pod.status.phase if pod.status else None
+            if not name or phase not in TERMINAL_PHASES:
+                continue
+
+            created = pod.metadata.creation_timestamp
+            age = (now - created).total_seconds() if created else 0
+            if age < options.ttl_seconds:
+                self._log.debug(f"Keeping {name}: {phase} for only {age:.0f}s")
+                continue
+
+            self._log.info(f"Sweeping {name}: {phase} for {age:.0f}s")
+            try:
+                self._client.delete_namespaced_pod(
+                    name=name,
+                    namespace=namespace,
+                    grace_period_seconds=self._grace_period,
+                )
+                deleted.append(name)
+            except ApiException as e:
+                if e.status != 404:  # Somebody else got there first
+                    self._log.warning(f"Could not sweep pod {name}: {e}")
+
+        if deleted:
+            self._log.info(f"Swept {len(deleted)} finished pod(s)")
+        return deleted
 
     def run(self, options: RunOptions) -> str:
         namespace = self._context["namespace"]

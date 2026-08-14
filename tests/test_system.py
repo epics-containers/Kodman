@@ -3,6 +3,7 @@ import os
 import subprocess
 import sys
 import tempfile
+import time
 from pathlib import Path
 
 import pytest
@@ -342,5 +343,56 @@ def test_kodman_failed_pod_does_not_restart():
     finally:
         subprocess.run(
             ["kubectl", "delete", "pod", pod_name, "--ignore-not-found"],
+            check=False,
+        )
+
+
+@pytest.mark.skipif(
+    not KODMAN_SYSTEM_TESTING, reason="export KODMAN_SYSTEM_TESTING=true"
+)
+def test_kodman_sweeps_pods_left_by_earlier_runs():
+    """A run without ``--rm`` leaves its pod behind forever - nothing in
+    Kubernetes collects a bare Pod. The next run reaps it.
+
+    ``KODMAN_POD_TTL=0`` drops the post-mortem window so the sweep is
+    observable without waiting an hour for the default.
+    """
+    before = _kodman_pod_names()
+    subprocess.run(
+        [ENTRY_POINT, "run", "--entrypoint", "bash", "ubuntu", "-c", "exit 3"],
+        capture_output=True,
+        text=True,
+    )
+    orphans = _kodman_pod_names() - before
+    assert len(orphans) == 1, f"expected one leftover pod, got {orphans}"
+    orphan = orphans.pop()
+
+    try:
+        # The pod carries the label the sweep selects on.
+        pod = json.loads(
+            subprocess.check_output(
+                ["kubectl", "get", "pod", orphan, "-o", "json"]
+            ).decode()
+        )
+        assert pod["metadata"]["labels"]["app.kubernetes.io/managed-by"] == "kodman"
+
+        result = subprocess.run(
+            [ENTRY_POINT, "run", "--rm", "hello-world"],
+            capture_output=True,
+            text=True,
+            env={**os.environ, "KODMAN_POD_TTL": "0"},
+        )
+        assert result.returncode == 0, result.stderr
+        # The sweep does not block the run on the delete completing, so give
+        # the API server a moment to finish removing the object.
+        for _ in range(30):
+            if orphan not in _kodman_pod_names():
+                break
+            time.sleep(1)
+        else:
+            pytest.fail(f"{orphan} survived the sweep")
+    finally:
+        subprocess.run(
+            ["kubectl", "delete", "pod", orphan, "--ignore-not-found"],
             check=False,
         )
