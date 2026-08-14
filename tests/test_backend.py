@@ -12,6 +12,7 @@ from kodman.backend import (
     MANAGED_BY_SELECTOR,
     MANAGED_BY_VALUE,
     Backend,
+    DeleteOptions,
     RunOptions,
     SweepOptions,
     _iter_log_lines,
@@ -165,6 +166,56 @@ def test_sweep_survives_a_failed_delete():
         [_pod("old-failed", "Failed", 7200)], delete_error=ApiException(status=404)
     )
     assert _backend(api).sweep(SweepOptions(ttl_seconds=0)) == []
+
+
+class FakeDeleteApi:
+    """Stands in for CoreV1Api over the calls delete() makes.
+
+    ``reads`` is the sequence of read_namespaced_pod outcomes: a pod, or an
+    ApiException to raise (404 once the pod has really gone).
+    """
+
+    def __init__(self, reads, delete_error=None, forever=False):
+        self._reads = list(reads)
+        self._delete_error = delete_error
+        self._forever = forever  # Never 404: the pod that will not go
+        self.deleted: list[str] = []
+
+    def read_namespaced_pod(self, name, namespace):
+        if self._forever:
+            return self._reads[0]
+        outcome = self._reads.pop(0) if self._reads else ApiException(status=404)
+        if isinstance(outcome, ApiException):
+            raise outcome
+        return outcome
+
+    def delete_namespaced_pod(self, name, namespace, grace_period_seconds=None):
+        if self._delete_error:
+            raise self._delete_error
+        self.deleted.append(name)
+
+
+def test_delete_reports_success():
+    api = FakeDeleteApi([_pod("gone", "Failed", 0), ApiException(status=404)])
+    assert _backend(api).delete(DeleteOptions("gone")) is True
+    assert api.deleted == ["gone"]
+
+
+def test_delete_reports_a_refused_delete(capsys):
+    # A role that can create pods but not delete them made every --rm a no-op,
+    # and said nothing about it. It has to reach stderr.
+    api = FakeDeleteApi([_pod("stuck", "Failed", 0)], delete_error=ApiException(403))
+    assert _backend(api).delete(DeleteOptions("stuck")) is False
+    assert "Could not delete pod stuck" in capsys.readouterr().err
+
+
+def test_delete_gives_up_on_a_pod_that_will_not_go(capsys):
+    # A pod held by a finalizer never 404s; this used to spin forever.
+    backend = _backend(FakeDeleteApi([_pod("zombie", "Failed", 0)], forever=True))
+    backend._polling_freq = 1000  # Don't really wait a minute
+    backend._delete_timeout = 0.05
+    assert backend.delete(DeleteOptions("zombie")) is False
+    assert "still present" in capsys.readouterr().err
 
 
 class FakeStreamResponse:
