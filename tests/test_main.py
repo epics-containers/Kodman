@@ -40,6 +40,7 @@ def _args(rm):
         entrypoint=None,
         rm=rm,
         volume=None,
+        cpus=None,
         image="busybox",
         command=None,
         args=[],
