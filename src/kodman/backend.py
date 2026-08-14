@@ -296,6 +296,18 @@ class Backend:
         self._log = log
         self._polling_freq = 1
         self._grace_period = 2  # Is this too aggressive?
+        self._delete_timeout: float = 60
+
+    def _warn(self, message: str):
+        """Report something the user needs to see whatever the log level.
+
+        Outside debug mode the log handler paints the rich status line, which
+        is transient - a warning sent only there is a warning nobody ever
+        reads. Cleanup that quietly fails looks exactly like cleanup that
+        worked, so these go to stderr as well.
+        """
+        self._log.warning(message)
+        print(message, file=sys.stderr)
 
     def connect(self):
         # Load config for user/serviceaccount
@@ -346,13 +358,13 @@ class Backend:
                 label_selector=MANAGED_BY_SELECTOR,
             )
         except ApiException as e:
-            self._log.warning(f"Could not list pods to sweep: {e}")
+            self._warn(f"Could not list pods to sweep: {e}")
             return []
         if not isinstance(pod_list, V1PodList):  # Runtime type checking
             # Warn rather than raise: a client whose response type moved under
             # us must not take down every run, which is how the pod log stream
             # broke on kubernetes 36.x (issue #51).
-            self._log.warning(f"Unexpected response type to sweep: {type(pod_list)}")
+            self._warn(f"Unexpected response type to sweep: {type(pod_list)}")
             return []
 
         now = datetime.now(UTC)
@@ -379,7 +391,7 @@ class Backend:
                 deleted.append(name)
             except ApiException as e:
                 if e.status != 404:  # Somebody else got there first
-                    self._log.warning(f"Could not sweep pod {name}: {e}")
+                    self._warn(f"Could not sweep pod {name}: {e}")
 
         if deleted:
             self._log.info(f"Swept {len(deleted)} finished pod(s)")
@@ -537,7 +549,14 @@ class Backend:
 
         return unique_pod_name
 
-    def delete(self, options: DeleteOptions):
+    def delete(self, options: DeleteOptions) -> bool:
+        """Delete a pod and wait for it to go, reporting whether it went.
+
+        A cleanup that fails must say so on stderr. Silently swallowing the
+        error - which is what this did - makes a --rm that never removes
+        anything indistinguishable from one that works, and the pods pile up
+        in the namespace with nothing in the CI log to explain why.
+        """
         namespace = self._context["namespace"]
         try:
             exists_resp = self._client.read_namespaced_pod(
@@ -549,6 +568,7 @@ class Backend:
                 namespace=namespace,
                 grace_period_seconds=self._grace_period,
             )
+            waited = 0
             while exists_resp:
                 self._log.info("Awaiting pod cleanup...")
                 try:
@@ -557,12 +577,26 @@ class Backend:
                         namespace=namespace,
                     )
                     time.sleep(1 / self._polling_freq)
+                    # A pod held by a finalizer never 404s, and this used to
+                    # spin on it forever, taking the whole run with it.
+                    waited += 1 / self._polling_freq
+                    if waited >= self._delete_timeout:
+                        self._warn(
+                            f"Pod {options.name} still present "
+                            f"{waited:.0f}s after being deleted"
+                        )
+                        return False
                 except ApiException as e:
                     if e.status == 404:
                         self._log.info(f"Pod {options.name} deleted successfully")
-                        break
+                        return True
                     else:
                         raise e
 
         except ApiException as e:
-            self._log.info(f"Error deleting pod: {e}")
+            # 403 here means the role can create pods but not delete them, so
+            # every --rm has been quietly leaving its pod behind.
+            self._warn(f"Could not delete pod {options.name}: {e}")
+            return False
+
+        return True
