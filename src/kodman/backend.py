@@ -1,5 +1,6 @@
 import io
 import logging
+import ssl
 import sys
 import tarfile
 import time
@@ -15,6 +16,7 @@ from kubernetes.client.models.v1_pod_list import V1PodList
 from kubernetes.client.rest import ApiException
 from kubernetes.stream import stream
 from urllib3 import HTTPResponse
+from urllib3.util.ssl_ import create_urllib3_context
 
 
 @dataclass(frozen=True)
@@ -276,6 +278,29 @@ def cp_k8s(
     log.info("Transfer done")
 
 
+def relax_x509_strict(api_client: client.ApiClient) -> None:
+    """Accept cluster CA certificates that strict X.509 checks reject.
+
+    Python 3.13 made ``VERIFY_X509_STRICT`` a default verification flag, and
+    urllib3 2.4.0 adopted it. Many Kubernetes clusters have a root CA without
+    the Authority Key Identifier extension, which strict mode rejects with
+    ``CERTIFICATE_VERIFY_FAILED: Missing Authority Key Identifier``. kubectl
+    accepts these certificates. See kubernetes-client/python#2394 and
+    epics-containers/ioc-template#79.
+
+    Only the strict flag is cleared. The certificate chain and host name are
+    still verified. Clients with TLS verification disabled are left unchanged.
+
+    Args:
+        api_client: The client whose connection pools should use the context.
+    """
+    if not api_client.configuration.verify_ssl:
+        return
+    context = create_urllib3_context()
+    context.verify_flags &= ~ssl.VERIFY_X509_STRICT
+    api_client.rest_client.pool_manager.connection_pool_kw["ssl_context"] = context
+
+
 def get_incluster_context():
     ns_path = "/var/run/secrets/kubernetes.io/serviceaccount/namespace"
     context = {}
@@ -314,6 +339,7 @@ class Backend:
             self._context = get_incluster_context()
 
         self._client = client.CoreV1Api()
+        relax_x509_strict(self._client.api_client)
         self._log.debug("The current context is:")
         self._log.debug(f"  Cluster: {self._context['cluster']}")
         self._log.debug(f"  Namespace: {self._context['namespace']}")
