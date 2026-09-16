@@ -284,6 +284,26 @@ def test_kodman_fail_command(data: Path):
     assert responses.failed_command in result.stderr
 
 
+def _wait_for_terminal_pod(pod_name: str, timeout: float = 60) -> dict:
+    """Return the pod as JSON once its phase is Succeeded or Failed.
+
+    kodman returns when the container exits, but the kubelet can report the
+    container's termination before it updates the pod phase. Tests that read
+    the phase, or that rely on the sweep (which only removes terminal pods),
+    must wait for the phase to settle.
+    """
+    deadline = time.monotonic() + timeout
+    while True:
+        pod = json.loads(
+            subprocess.check_output(["kubectl", "get", "pod", pod_name, "-o", "json"])
+        )
+        if pod["status"].get("phase") in ("Succeeded", "Failed"):
+            return pod
+        if time.monotonic() > deadline:
+            pytest.fail(f"{pod_name} did not reach a terminal phase: {pod['status']}")
+        time.sleep(1)
+
+
 def _kodman_pod_names() -> set[str]:
     out = subprocess.check_output(["kubectl", "get", "pods", "-o", "json"]).decode()
     pods = json.loads(out)["items"]
@@ -329,11 +349,7 @@ def test_kodman_failed_pod_does_not_restart():
     pod_name = new_pods.pop()
 
     try:
-        pod = json.loads(
-            subprocess.check_output(
-                ["kubectl", "get", "pod", pod_name, "-o", "json"]
-            ).decode()
-        )
+        pod = _wait_for_terminal_pod(pod_name)
         assert pod["spec"]["restartPolicy"] == "Never"
         assert pod["status"]["phase"] == "Failed", pod["status"]
         exec_status = next(
@@ -375,6 +391,8 @@ def test_kodman_sweeps_pods_left_by_earlier_runs():
             ).decode()
         )
         assert pod["metadata"]["labels"]["app.kubernetes.io/managed-by"] == "kodman"
+        # The sweep only removes pods in a terminal phase.
+        _wait_for_terminal_pod(orphan)
 
         result = subprocess.run(
             [ENTRY_POINT, "run", "--rm", "hello-world"],
