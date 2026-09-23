@@ -33,6 +33,12 @@ def test_context_names_cluster_and_service_account(sa_dir, monkeypatch):
     }
 
 
+def test_ipv6_api_server_is_bracketed(sa_dir, monkeypatch):
+    monkeypatch.setenv("KUBERNETES_SERVICE_HOST", "fd00::1")
+    monkeypatch.setenv("KUBERNETES_SERVICE_PORT", "443")
+    assert get_incluster_context(sa_dir)["cluster"] == "[fd00::1]:443"
+
+
 def test_context_without_token_or_service_env(sa_dir, monkeypatch):
     monkeypatch.delenv("KUBERNETES_SERVICE_HOST", raising=False)
     context = get_incluster_context(sa_dir)

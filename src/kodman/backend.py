@@ -334,7 +334,11 @@ def get_incluster_context(sa_dir: Path = SERVICE_ACCOUNT_DIR) -> dict[str, str]:
     context = {"namespace": (sa_dir / "namespace").read_text().strip()}
     host = os.getenv("KUBERNETES_SERVICE_HOST")
     port = os.getenv("KUBERNETES_SERVICE_PORT")
-    context["cluster"] = f"{host}:{port}" if host and port else "in-cluster"
+    if host and port:
+        # Bracket IPv6 addresses the way the kubernetes client does.
+        context["cluster"] = f"[{host}]:{port}" if ":" in host else f"{host}:{port}"
+    else:
+        context["cluster"] = "in-cluster"
     try:
         subject = _token_subject((sa_dir / "token").read_text().strip())
     except OSError:
