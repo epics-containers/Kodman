@@ -363,7 +363,9 @@ def test_volume_ro_makes_only_the_workload_mount_read_only(tmp_path):
     assert "readOnly" not in spec["initContainers"][0]["volumeMounts"][0]
 
 
-@pytest.mark.parametrize("options", ["z", "Z", "rw", "rw,z", "ro,Z", "rslave"])
+@pytest.mark.parametrize(
+    "options", ["z", "Z", "rw", "rw,z", "ro,Z", "rslave", "cached", "ro,delegated"]
+)
 def test_volume_docker_options_are_accepted(tmp_path, options):
     src = tmp_path / "data"
     src.mkdir()
@@ -384,3 +386,20 @@ def test_volume_too_many_fields_is_an_error(tmp_path):
     src.mkdir()
     with pytest.raises(ValueError, match="Invalid volume specification"):
         _volume_manifest(f"{src}:/data:ro:extra")
+
+
+def test_volume_ro_on_a_file_covers_only_the_file(tmp_path):
+    # With subPath staging (#62) 'ro' on a file mount covers just that file,
+    # same as docker - unlike the old parent-directory mount, which used to
+    # widen it to the whole containing directory and warn about doing so.
+    src = tmp_path / "cfg.yml"
+    src.write_text("x")
+    spec, _ = _volume_manifest(f"{src}:/etc/app/cfg.yml:ro")
+    assert spec["containers"][0]["volumeMounts"] == [
+        {
+            "name": "shared-data-0",
+            "mountPath": "/etc/app/cfg.yml",
+            "subPath": "cfg.yml",
+            "readOnly": True,
+        }
+    ]

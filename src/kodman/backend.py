@@ -89,10 +89,17 @@ FILE_STAGING_DIR = Path("/kodman-volumes")
 
 # docker's bind-mount options that make no sense for a copy into an emptyDir:
 # SELinux relabelling (the copy is labelled by the pod) and mount propagation
-# (nothing on the host is mounted). Accepted, as docker accepts them, so that a
-# command line written for docker still runs.
+# (nothing on the host is mounted), and Docker Desktop's file-sharing
+# consistency modes (consistent, cached, delegated), which docker on Linux
+# also accepts as no-ops and which are common in scripts written on macOS.
+# Accepted, as docker accepts them, so that a command line written for docker
+# still runs.
 IGNORED_VOLUME_OPTIONS = frozenset(
-    ("z", "Z", "shared", "rshared", "slave", "rslave", "private", "rprivate")
+    (
+        *("z", "Z"),
+        *("shared", "rshared", "slave", "rslave", "private", "rprivate"),
+        *("consistent", "cached", "delegated"),
+    )
 )
 
 
