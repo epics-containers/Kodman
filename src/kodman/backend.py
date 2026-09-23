@@ -1,5 +1,8 @@
+import base64
 import io
+import json
 import logging
+import os
 import ssl
 import sys
 import tarfile
@@ -301,13 +304,42 @@ def relax_x509_strict(api_client: client.ApiClient) -> None:
     api_client.rest_client.pool_manager.connection_pool_kw["ssl_context"] = context
 
 
-def get_incluster_context():
-    ns_path = "/var/run/secrets/kubernetes.io/serviceaccount/namespace"
-    context = {}
-    with open(ns_path) as f:
-        context["namespace"] = f.read().strip()
-    context["cluster"] = "default"
-    context["user"] = "default"
+SERVICE_ACCOUNT_DIR = Path("/var/run/secrets/kubernetes.io/serviceaccount")
+
+
+def _token_subject(token: str) -> str | None:
+    """Return the ``sub`` claim of a service account JWT, without verifying it.
+
+    Only used to name the user in debug output; the API server does the
+    verification.
+    """
+    try:
+        payload = token.split(".")[1]
+        claims = json.loads(
+            base64.urlsafe_b64decode(payload + "=" * (-len(payload) % 4))
+        )
+        return claims.get("sub")
+    except (IndexError, ValueError, AttributeError):
+        return None
+
+
+def get_incluster_context(sa_dir: Path = SERVICE_ACCOUNT_DIR) -> dict[str, str]:
+    """Describe the in-cluster context the way a kubeconfig context would.
+
+    The namespace is the one the service account lives in. The cluster is the
+    API server address kubernetes injects into every pod, and the user is the
+    service account's identity (``system:serviceaccount:<ns>:<name>``) taken
+    from its token.
+    """
+    context = {"namespace": (sa_dir / "namespace").read_text().strip()}
+    host = os.getenv("KUBERNETES_SERVICE_HOST")
+    port = os.getenv("KUBERNETES_SERVICE_PORT")
+    context["cluster"] = f"{host}:{port}" if host and port else "in-cluster"
+    try:
+        subject = _token_subject((sa_dir / "token").read_text().strip())
+    except OSError:
+        subject = None
+    context["user"] = subject or "in-cluster service account"
     return context
 
 
