@@ -23,8 +23,8 @@ class FakeBackend:
         self.deleted: list[str] = []
         self.swept: list[int] = []
 
-    def connect(self):
-        pass
+    def connect(self, context=None, namespace=None):
+        self.connected = (context, namespace)
 
     def sweep(self, options):
         self.swept.append(options.ttl_seconds)
@@ -59,7 +59,12 @@ def _args(rm, extra=()):
     return parser.parse_args(argv)
 
 
-_ENV = {"KODMAN_SERVICE_ACCOUNT": "", "KODMAN_POD_TTL": None}
+_ENV = {
+    "KODMAN_SERVICE_ACCOUNT": "",
+    "KODMAN_POD_TTL": None,
+    "KODMAN_CONTEXT": None,
+    "KODMAN_NAMESPACE": None,
+}
 
 
 def test_rm_deletes_pod_on_success():
@@ -131,3 +136,17 @@ def test_pod_ttl_env_overrides_the_default():
     env = {**_ENV, "KODMAN_POD_TTL": 0}
     RunCommand().do(_args(rm=True), ctx, env, _log)
     assert ctx.swept == [0]
+
+
+def test_context_env_reaches_the_backend():
+    ctx = FakeBackend()
+    env = {**_ENV, "KODMAN_CONTEXT": "prod", "KODMAN_NAMESPACE": "ci"}
+    RunCommand().do(_args(rm=True), ctx, env, _log)
+    assert ctx.connected == ("prod", "ci")
+
+
+def test_empty_context_env_keeps_the_current_context():
+    ctx = FakeBackend()
+    env = {**_ENV, "KODMAN_CONTEXT": "", "KODMAN_NAMESPACE": ""}
+    RunCommand().do(_args(rm=True), ctx, env, _log)
+    assert ctx.connected == (None, None)
