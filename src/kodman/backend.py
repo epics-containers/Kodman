@@ -14,6 +14,7 @@ from kubernetes.client.models.core_v1_event_list import CoreV1EventList
 from kubernetes.client.models.v1_pod import V1Pod
 from kubernetes.client.models.v1_pod_list import V1PodList
 from kubernetes.client.rest import ApiException
+from kubernetes.config import kube_config
 from kubernetes.stream import stream
 from urllib3 import HTTPResponse
 from urllib3.util.ssl_ import create_urllib3_context
@@ -307,13 +308,17 @@ def get_kube_config_context(name: str | None = None) -> dict[str, str]:
     Args:
         name: the context to describe, or None for the current context.
     """
-    contexts, current = cast(
-        tuple[list[dict[str, Any]], dict[str, Any]],
-        config.list_kube_config_contexts(),
-    )
-    selected = current
     if name:
-        selected = next(c for c in contexts if c["name"] == name)
+        # Read the merged kubeconfig directly: list_kube_config_contexts()
+        # requires a current-context, which kubectl --context does not.
+        merger = kube_config.KubeConfigMerger(kube_config.KUBE_CONFIG_DEFAULT_LOCATION)
+        merged = cast(dict[str, Any], cast(Any, merger.config).value)
+        selected = next(c.value for c in merged["contexts"] if c["name"] == name)
+    else:
+        _, selected = cast(
+            tuple[list[dict[str, Any]], dict[str, Any]],
+            config.list_kube_config_contexts(),
+        )
     context = dict(selected["context"])
     # kubectl treats a context without a namespace as the "default" namespace.
     context.setdefault("namespace", "default")

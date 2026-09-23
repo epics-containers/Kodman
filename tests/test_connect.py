@@ -69,3 +69,13 @@ def test_unknown_context_is_an_error(kubeconfig: Path):
     # Must not fall back to in-cluster config and run somewhere unexpected.
     with pytest.raises(ConfigException):
         _connect(context="missing")
+
+
+def test_context_override_without_current_context(tmp_path: Path, monkeypatch):
+    # kubectl --context works on a kubeconfig that never ran use-context.
+    path = tmp_path / "config"
+    path.write_text(KUBECONFIG.replace("current-context: dev\n", ""))
+    monkeypatch.setattr(kube_config, "KUBE_CONFIG_DEFAULT_LOCATION", str(path))
+    backend = _connect(context="prod")
+    assert backend._context["cluster"] == "prod-cluster"
+    assert backend._context["namespace"] == "default"
