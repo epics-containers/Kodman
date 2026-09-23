@@ -63,7 +63,9 @@ class Run(Command):
             "-v",
             type=str,
             action="append",
-            help="Bind mount a volume into the container",
+            help="Copy a file or directory into the container: SRC[:DST[:OPTIONS]]. "
+            "OPTIONS 'ro' mounts it read-only; SELinux (z, Z) and propagation "
+            "options are accepted and ignored",
         )
         parser_run.add_argument(
             "--cpus",

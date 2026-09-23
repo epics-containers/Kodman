@@ -352,3 +352,35 @@ def test_two_files_into_one_directory_do_not_collide(tmp_path):
         m["mountPath"] for m in manifest["spec"]["containers"][0]["volumeMounts"]
     ]
     assert mount_paths == ["/etc/one.conf", "/etc/two.conf"]
+
+
+def test_volume_ro_makes_only_the_workload_mount_read_only(tmp_path):
+    src = tmp_path / "data"
+    src.mkdir()
+    spec, _ = _volume_manifest(f"{src}:/data:ro")
+    assert spec["containers"][0]["volumeMounts"][0]["readOnly"] is True
+    # The init container still has to copy the data in.
+    assert "readOnly" not in spec["initContainers"][0]["volumeMounts"][0]
+
+
+@pytest.mark.parametrize("options", ["z", "Z", "rw", "rw,z", "ro,Z", "rslave"])
+def test_volume_docker_options_are_accepted(tmp_path, options):
+    src = tmp_path / "data"
+    src.mkdir()
+    spec, _ = _volume_manifest(f"{src}:/data:{options}")
+    mount = spec["containers"][0]["volumeMounts"][0]
+    assert mount.get("readOnly", False) == ("ro" in options.split(","))
+
+
+def test_volume_unknown_option_is_an_error(tmp_path):
+    src = tmp_path / "data"
+    src.mkdir()
+    with pytest.raises(ValueError, match="Unsupported volume option: nocopy"):
+        _volume_manifest(f"{src}:/data:nocopy")
+
+
+def test_volume_too_many_fields_is_an_error(tmp_path):
+    src = tmp_path / "data"
+    src.mkdir()
+    with pytest.raises(ValueError, match="Invalid volume specification"):
+        _volume_manifest(f"{src}:/data:ro:extra")

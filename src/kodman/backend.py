@@ -87,6 +87,33 @@ DEFAULT_POD_TTL_SECONDS = 3600
 FILE_STAGING_DIR = Path("/kodman-volumes")
 
 
+# docker's bind-mount options that make no sense for a copy into an emptyDir:
+# SELinux relabelling (the copy is labelled by the pod) and mount propagation
+# (nothing on the host is mounted). Accepted, as docker accepts them, so that a
+# command line written for docker still runs.
+IGNORED_VOLUME_OPTIONS = frozenset(
+    ("z", "Z", "shared", "rshared", "slave", "rslave", "private", "rprivate")
+)
+
+
+def parse_volume_options(options: str) -> bool:
+    """Check the options field of ``-v src:dst:options`` and return read_only.
+
+    ``ro`` and ``rw`` are honoured on the workload container. The options in
+    ``IGNORED_VOLUME_OPTIONS`` are accepted and ignored. Anything else is an
+    error rather than silently dropped.
+    """
+    read_only = False
+    for option in filter(None, options.split(",")):
+        if option == "ro":
+            read_only = True
+        elif option == "rw":
+            read_only = False
+        elif option not in IGNORED_VOLUME_OPTIONS:
+            raise ValueError(f"Unsupported volume option: {option}")
+    return read_only
+
+
 def build_pod_manifest(
     options: RunOptions, log: logging.Logger
 ) -> tuple[str, dict[str, Any], list[dict[str, Path]]]:
@@ -170,6 +197,8 @@ def build_pod_manifest(
     if options.volumes:
         for i, options_volume in enumerate(options.volumes):
             process = options_volume.split(":")
+            if len(process) > 3:
+                raise ValueError(f"Invalid volume specification: {options_volume}")
             src = Path(process[0]).resolve()
             if not src.exists():
                 raise FileNotFoundError(f"{src} does not exist")
@@ -178,6 +207,7 @@ def build_pod_manifest(
                 dst = Path(process[1])
             except IndexError:
                 pass
+            read_only = parse_volume_options(process[2] if len(process) > 2 else "")
             if not dst.is_absolute():
                 raise ValueError("Destination path must be absolute")
             if dst == Path("/"):
@@ -213,6 +243,10 @@ def build_pod_manifest(
             pod_manifest["spec"]["initContainers"][0]["volumeMounts"].append(
                 {"name": volume_name, "mountPath": str(init_mount_path)}
             )
+            # The init container copies the data in, so only the workload's
+            # own mount can be read-only.
+            if read_only:
+                workload_mount["readOnly"] = True
             pod_manifest["spec"]["containers"][0]["volumeMounts"].append(workload_mount)
             pod_manifest["spec"]["volumes"].append(
                 {
