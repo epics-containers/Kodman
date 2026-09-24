@@ -160,6 +160,46 @@ def test_kodman_run_mount_dir(data: Path):
     assert subprocess.check_output(cmd).decode().strip() == responses.mount
 
 
+# Reads the mounted file, then exits non-zero if the mount is writable.
+READ_ONLY_CHECK = "cat test/to_mount.txt && ! touch test/written 2>/dev/null"
+
+
+@pytest.mark.skipif(
+    not KODMAN_SYSTEM_TESTING, reason="export KODMAN_SYSTEM_TESTING=true"
+)
+def test_docker_run_mount_dir_ro(data: Path):
+    cmd = [
+        DOCKER_PROVIDER,
+        "run",
+        "-v",
+        f"{data}:/test:ro",
+        "--rm",
+        "ubuntu",
+        "bash",
+        "-c",
+        READ_ONLY_CHECK,
+    ]
+    assert subprocess.check_output(cmd).decode().strip() == responses.mount
+
+
+@pytest.mark.skipif(
+    not KODMAN_SYSTEM_TESTING, reason="export KODMAN_SYSTEM_TESTING=true"
+)
+def test_kodman_run_mount_dir_ro(data: Path):
+    cmd = [
+        ENTRY_POINT,
+        "run",
+        "-v",
+        f"{data}:/test:ro",
+        "--rm",
+        "ubuntu",
+        "bash",
+        "-c",
+        READ_ONLY_CHECK,
+    ]
+    assert subprocess.check_output(cmd).decode().strip() == responses.mount
+
+
 @pytest.mark.skipif(
     not KODMAN_SYSTEM_TESTING, reason="export KODMAN_SYSTEM_TESTING=true"
 )

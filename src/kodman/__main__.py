@@ -9,6 +9,7 @@ from .backend import (
     DeleteOptions,
     RunOptions,
     SweepOptions,
+    parse_volume_options,
 )
 from .engine import ArgparseEngine, Command
 
@@ -44,6 +45,22 @@ class KodmanEngine(ArgparseEngine):
 engine = KodmanEngine()
 
 
+def volume_spec(value: str) -> str:
+    """argparse ``type`` for ``-v``: reject a bad option before any cluster access.
+
+    Only the shape and the options field are checked here; the paths are
+    resolved when the pod manifest is built.
+    """
+    fields = value.split(":")
+    if len(fields) > 3:
+        raise argparse.ArgumentTypeError(f"Invalid volume specification: {value}")
+    try:
+        parse_volume_options(fields[2] if len(fields) > 2 else "")
+    except ValueError as e:
+        raise argparse.ArgumentTypeError(str(e)) from e
+    return value
+
+
 @engine.add_command
 class Run(Command):
     def add(self, parser):
@@ -61,9 +78,12 @@ class Run(Command):
         parser_run.add_argument(
             "--volume",
             "-v",
-            type=str,
+            type=volume_spec,
             action="append",
-            help="Bind mount a volume into the container",
+            help="Copy a file or directory into the container: SRC[:DST[:OPTIONS]]. "
+            "OPTIONS 'ro' mounts it read-only; SELinux (z, Z), propagation and "
+            "consistency (cached, delegated, consistent) options are accepted "
+            "and ignored",
         )
         parser_run.add_argument(
             "--cpus",

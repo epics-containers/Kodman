@@ -150,3 +150,22 @@ def test_empty_context_env_keeps_the_current_context():
     env = {**_ENV, "KODMAN_CONTEXT": "", "KODMAN_NAMESPACE": ""}
     RunCommand().do(_args(rm=True), ctx, env, _log)
     assert ctx.connected == (None, None)
+
+
+@pytest.mark.parametrize("spec", ["./x", "./x:/x", "./x:/x:ro", "./x:/x:cached,z"])
+def test_volume_spec_accepts_docker_forms(spec):
+    assert _args(rm=False, extra=["-v", spec]).volume == [spec]
+
+
+@pytest.mark.parametrize(
+    "spec, error",
+    [
+        ("./x:/x:typo", "Unsupported volume option: typo"),
+        ("./x:/x:ro:extra", "Invalid volume specification"),
+    ],
+)
+def test_volume_spec_rejects_bad_options_while_parsing(spec, error, capsys):
+    # Rejected by argparse, before Run.do connects to or sweeps the cluster.
+    with pytest.raises(SystemExit):
+        _args(rm=False, extra=["-v", spec])
+    assert error in capsys.readouterr().err

@@ -33,6 +33,12 @@ mkdir demo
 echo "Mellon" > demo/token.txt
 kodman run -v ./demo:/demo --rm ubuntu bash -c "cat demo/token.txt"
 ```
+The files are copied in, not bind mounted, so changes made in the container
+are not seen on the host. Add `:ro` (`-v ./demo:/demo:ro`) to make the copy
+read-only in the container - for a single file this covers just that file,
+as docker does. docker's SELinux (`:z`, `:Z`), mount-propagation and
+consistency (`:cached`, `:delegated`, `:consistent`) options are accepted and
+ignored; any other option is an error.
 
 Ask for CPU, for work that needs more than the namespace hands out by default:
 ```
