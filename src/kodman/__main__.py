@@ -81,9 +81,9 @@ class Run(Command):
             type=volume_spec,
             action="append",
             help="Copy a file or directory into the container: SRC[:DST[:OPTIONS]]. "
-            "OPTIONS 'ro' mounts it read-only (for a file, its whole containing "
-            "directory); SELinux (z, Z), propagation and consistency (cached, "
-            "delegated, consistent) options are accepted and ignored",
+            "OPTIONS 'ro' mounts it read-only; SELinux (z, Z), propagation and "
+            "consistency (cached, delegated, consistent) options are accepted "
+            "and ignored",
         )
         parser_run.add_argument(
             "--cpus",
