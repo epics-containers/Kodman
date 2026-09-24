@@ -80,6 +80,11 @@ TERMINAL_PHASES = ("Succeeded", "Failed")
 # equivalent of a Job's ttlSecondsAfterFinished.
 DEFAULT_POD_TTL_SECONDS = 3600
 
+# Where the init container stages a single-file volume. The workload mounts
+# the file out of here with subPath, so this path only ever exists in the
+# init container.
+FILE_STAGING_DIR = Path("/kodman-volumes")
+
 
 def build_pod_manifest(
     options: RunOptions, log: logging.Logger
@@ -88,7 +93,9 @@ def build_pod_manifest(
 
     Returns ``(unique_pod_name, pod_manifest, volumes)`` where ``volumes`` is
     the cache of ``{"src", "dst"}`` mappings the caller later streams into the
-    init container with :func:`cp_k8s`.
+    init container with :func:`cp_k8s`. ``dst`` is the path *inside the init
+    container*, which for a single file is its staging path under
+    :data:`FILE_STAGING_DIR` rather than the path the workload sees.
 
     The pod is labelled ``app.kubernetes.io/managed-by=kodman`` so that
     :meth:`Backend.sweep` can find and reap it once it is finished with.
@@ -172,29 +179,43 @@ def build_pod_manifest(
                 pass
             if not dst.is_absolute():
                 raise ValueError("Destination path must be absolute")
+            if dst == Path("/"):
+                # docker rejects this too; a file would have no name to
+                # stage under and a directory would mount over the root.
+                raise ValueError("Destination path must not be '/'")
             log.info(f"Mount: {src} to {dst}")
+            volume_name = f"shared-data-{i}"
+            workload_mount: dict[str, Any] = {
+                "name": volume_name,
+                "mountPath": str(dst),
+            }
             if src.is_dir():
                 log.debug(f"Volume target {src} is a directory")
-                dst_mount = dst
+                # The whole emptyDir is the directory, so both containers
+                # mount it at the destination.
+                init_mount_path = dst
+                copy_dst = dst
             else:
                 log.debug(f"Volume target {src} is a file")
-                dst_mount = dst.parent
-                if dst_mount == Path("/"):
-                    raise NotImplementedError(
-                        "Root mounting of files not supported by k8s 'emptyDir'"
-                    )
+                # A file is staged in the emptyDir and the workload mounts it
+                # with subPath, so only the file appears at the destination.
+                # Mounting the emptyDir at the file's parent instead would
+                # hide everything else the image has in that directory, and
+                # any readOnly would cover the whole directory rather than
+                # the file.
+                init_mount_path = FILE_STAGING_DIR / volume_name
+                copy_dst = init_mount_path / dst.name
+                workload_mount["subPath"] = dst.name
 
-            volumes.append({"src": src, "dst": dst})  # cache for later
+            volumes.append({"src": src, "dst": copy_dst})  # cache for later
 
             pod_manifest["spec"]["initContainers"][0]["volumeMounts"].append(
-                {"name": f"shared-data-{i}", "mountPath": str(dst_mount)}
+                {"name": volume_name, "mountPath": str(init_mount_path)}
             )
-            pod_manifest["spec"]["containers"][0]["volumeMounts"].append(
-                {"name": f"shared-data-{i}", "mountPath": str(dst_mount)}
-            )
+            pod_manifest["spec"]["containers"][0]["volumeMounts"].append(workload_mount)
             pod_manifest["spec"]["volumes"].append(
                 {
-                    "name": f"shared-data-{i}",
+                    "name": volume_name,
                     "emptyDir": {},
                 }
             )
