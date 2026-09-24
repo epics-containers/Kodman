@@ -179,6 +179,10 @@ def build_pod_manifest(
                 pass
             if not dst.is_absolute():
                 raise ValueError("Destination path must be absolute")
+            if dst == Path("/"):
+                # docker rejects this too; a file would have no name to
+                # stage under and a directory would mount over the root.
+                raise ValueError("Destination path must not be '/'")
             log.info(f"Mount: {src} to {dst}")
             volume_name = f"shared-data-{i}"
             workload_mount: dict[str, Any] = {

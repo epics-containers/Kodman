@@ -2,6 +2,7 @@ import logging
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
+import pytest
 from kubernetes.client.models.v1_object_meta import V1ObjectMeta
 from kubernetes.client.models.v1_pod import V1Pod
 from kubernetes.client.models.v1_pod_list import V1PodList
@@ -274,6 +275,15 @@ def test_volume_file_at_the_root_is_supported(tmp_path):
             "subPath": "to_read.txt",
         }
     ]
+
+
+def test_volume_destination_root_is_an_error(tmp_path):
+    # Used to be a NotImplementedError from the parent-directory mount; now
+    # there is no parent to stage under, so it is rejected up front.
+    src = tmp_path / "x.txt"
+    src.write_text("x")
+    with pytest.raises(ValueError, match="must not be '/'"):
+        _volume_manifest(f"{src}:/")
 
 
 def test_two_files_into_one_directory_do_not_collide(tmp_path):
