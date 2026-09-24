@@ -206,6 +206,8 @@ def test_kodman_run_mount_file(data: Path):
     not KODMAN_SYSTEM_TESTING, reason="export KODMAN_SYSTEM_TESTING=true"
 )
 def test_kodman_run_mount_root(data: Path):
+    # A file is mounted with subPath, so its destination directory is not
+    # mounted over and the root of the container is a legal destination.
     file_mount = "to_mount.txt"
     file_new = "to_read.txt"
     cmd = [
@@ -217,11 +219,31 @@ def test_kodman_run_mount_root(data: Path):
         "ubuntu",
         "bash",
         "-c",
-        f"cat test/{file_new}",
+        f"cat /{file_new}",
     ]
 
-    result = subprocess.run(cmd, capture_output=True, text=True)
-    assert result.returncode == 1
+    assert subprocess.check_output(cmd).decode().strip() == responses.mount
+
+
+@pytest.mark.skipif(
+    not KODMAN_SYSTEM_TESTING, reason="export KODMAN_SYSTEM_TESTING=true"
+)
+def test_kodman_run_mount_file_keeps_the_directory(data: Path):
+    # Mounting a file must not hide the rest of the directory it lands in.
+    file_mount = "to_mount.txt"
+    cmd = [
+        ENTRY_POINT,
+        "run",
+        "-v",
+        f"{data}/{file_mount}:/etc/kodman.conf",
+        "--rm",
+        "ubuntu",
+        "bash",
+        "-c",
+        "cat /etc/kodman.conf && test -f /etc/passwd",
+    ]
+
+    assert subprocess.check_output(cmd).decode().strip() == responses.mount
 
 
 @pytest.mark.skipif(

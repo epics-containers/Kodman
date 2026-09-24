@@ -1,6 +1,8 @@
 import logging
 from datetime import UTC, datetime, timedelta
+from pathlib import Path
 
+import pytest
 from kubernetes.client.models.v1_object_meta import V1ObjectMeta
 from kubernetes.client.models.v1_pod import V1Pod
 from kubernetes.client.models.v1_pod_list import V1PodList
@@ -12,6 +14,7 @@ from kodman.backend import (
     MANAGED_BY_SELECTOR,
     MANAGED_BY_VALUE,
     Backend,
+    DeleteOptions,
     RunOptions,
     SweepOptions,
     _iter_log_lines,
@@ -167,6 +170,56 @@ def test_sweep_survives_a_failed_delete():
     assert _backend(api).sweep(SweepOptions(ttl_seconds=0)) == []
 
 
+class FakeDeleteApi:
+    """Stands in for CoreV1Api over the calls delete() makes.
+
+    ``reads`` is the sequence of read_namespaced_pod outcomes: a pod, or an
+    ApiException to raise (404 once the pod has really gone).
+    """
+
+    def __init__(self, reads, delete_error=None, forever=False):
+        self._reads = list(reads)
+        self._delete_error = delete_error
+        self._forever = forever  # Never 404: the pod that will not go
+        self.deleted: list[str] = []
+
+    def read_namespaced_pod(self, name, namespace):
+        if self._forever:
+            return self._reads[0]
+        outcome = self._reads.pop(0) if self._reads else ApiException(status=404)
+        if isinstance(outcome, ApiException):
+            raise outcome
+        return outcome
+
+    def delete_namespaced_pod(self, name, namespace, grace_period_seconds=None):
+        if self._delete_error:
+            raise self._delete_error
+        self.deleted.append(name)
+
+
+def test_delete_reports_success():
+    api = FakeDeleteApi([_pod("gone", "Failed", 0), ApiException(status=404)])
+    assert _backend(api).delete(DeleteOptions("gone")) is True
+    assert api.deleted == ["gone"]
+
+
+def test_delete_reports_a_refused_delete(capsys):
+    # A role that can create pods but not delete them made every --rm a no-op,
+    # and said nothing about it. It has to reach stderr.
+    api = FakeDeleteApi([_pod("stuck", "Failed", 0)], delete_error=ApiException(403))
+    assert _backend(api).delete(DeleteOptions("stuck")) is False
+    assert "Could not delete pod stuck" in capsys.readouterr().err
+
+
+def test_delete_gives_up_on_a_pod_that_will_not_go(capsys):
+    # A pod held by a finalizer never 404s; this used to spin forever.
+    backend = _backend(FakeDeleteApi([_pod("zombie", "Failed", 0)], forever=True))
+    backend._polling_freq = 1000  # Don't really wait a minute
+    backend._delete_timeout = 0.05
+    assert backend.delete(DeleteOptions("zombie")) is False
+    assert "still present" in capsys.readouterr().err
+
+
 class FakeStreamResponse:
     """Mimics the urllib3 response returned by read_namespaced_pod_log when
     _preload_content=False: .stream() yields arbitrary byte chunks."""
@@ -207,3 +260,95 @@ def test_iter_log_lines_handles_str_segments():
 def test_iter_log_lines_replaces_invalid_utf8():
     resp = FakeStreamResponse([b"bad\xffbyte\n"])
     assert list(_iter_log_lines(resp)) == ["bad�byte"]
+
+
+def _volume_manifest(spec: str):
+    _, manifest, volumes = build_pod_manifest(
+        RunOptions(image="busybox", volumes=[spec]), _log
+    )
+    return manifest["spec"], volumes
+
+
+def test_volume_dir_mounts_the_directory(tmp_path):
+    src = tmp_path / "data"
+    src.mkdir()
+    spec, volumes = _volume_manifest(f"{src}:/data")
+    assert spec["containers"][0]["volumeMounts"] == [
+        {"name": "shared-data-0", "mountPath": "/data"}
+    ]
+    assert spec["initContainers"][0]["volumeMounts"] == [
+        {"name": "shared-data-0", "mountPath": "/data"}
+    ]
+    assert volumes == [{"src": src, "dst": Path("/data")}]
+
+
+def test_volume_file_mounts_only_the_file(tmp_path):
+    # The parent directory must not be mounted over: everything else the
+    # image has in it has to survive, and a readOnly mount must cover the
+    # file alone.
+    src = tmp_path / "cfg.yml"
+    src.write_text("x")
+    spec, volumes = _volume_manifest(f"{src}:/etc/app/cfg.yml")
+    assert spec["containers"][0]["volumeMounts"] == [
+        {
+            "name": "shared-data-0",
+            "mountPath": "/etc/app/cfg.yml",
+            "subPath": "cfg.yml",
+        }
+    ]
+    # The init container fills the staged copy, out of the way of the image.
+    assert spec["initContainers"][0]["volumeMounts"] == [
+        {"name": "shared-data-0", "mountPath": "/kodman-volumes/shared-data-0"}
+    ]
+    assert volumes == [
+        {"src": src, "dst": Path("/kodman-volumes/shared-data-0/cfg.yml")}
+    ]
+
+
+def test_volume_file_renamed_by_the_destination(tmp_path):
+    src = tmp_path / "from.txt"
+    src.write_text("x")
+    spec, volumes = _volume_manifest(f"{src}:/test/to.txt")
+    assert spec["containers"][0]["volumeMounts"][0]["subPath"] == "to.txt"
+    assert volumes[0]["dst"] == Path("/kodman-volumes/shared-data-0/to.txt")
+
+
+def test_volume_file_at_the_root_is_supported(tmp_path):
+    # Used to raise NotImplementedError, because mounting the emptyDir at the
+    # file's parent meant mounting it over /.
+    src = tmp_path / "to_read.txt"
+    src.write_text("x")
+    spec, _ = _volume_manifest(f"{src}:/to_read.txt")
+    assert spec["containers"][0]["volumeMounts"] == [
+        {
+            "name": "shared-data-0",
+            "mountPath": "/to_read.txt",
+            "subPath": "to_read.txt",
+        }
+    ]
+
+
+def test_volume_destination_root_is_an_error(tmp_path):
+    # Used to be a NotImplementedError from the parent-directory mount; now
+    # there is no parent to stage under, so it is rejected up front.
+    src = tmp_path / "x.txt"
+    src.write_text("x")
+    with pytest.raises(ValueError, match="must not be '/'"):
+        _volume_manifest(f"{src}:/")
+
+
+def test_two_files_into_one_directory_do_not_collide(tmp_path):
+    first = tmp_path / "one.conf"
+    first.write_text("1")
+    second = tmp_path / "two.conf"
+    second.write_text("2")
+    options = RunOptions(
+        image="busybox",
+        volumes=[f"{first}:/etc/one.conf", f"{second}:/etc/two.conf"],
+    )
+    _, manifest, _ = build_pod_manifest(options, _log)
+    # Two mounts at the same mountPath would have shadowed each other.
+    mount_paths = [
+        m["mountPath"] for m in manifest["spec"]["containers"][0]["volumeMounts"]
+    ]
+    assert mount_paths == ["/etc/one.conf", "/etc/two.conf"]

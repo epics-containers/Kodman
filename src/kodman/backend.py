@@ -17,6 +17,7 @@ from kubernetes.client.models.core_v1_event_list import CoreV1EventList
 from kubernetes.client.models.v1_pod import V1Pod
 from kubernetes.client.models.v1_pod_list import V1PodList
 from kubernetes.client.rest import ApiException
+from kubernetes.config import kube_config
 from kubernetes.stream import stream
 from urllib3 import HTTPResponse
 from urllib3.util.ssl_ import create_urllib3_context
@@ -83,6 +84,11 @@ TERMINAL_PHASES = ("Succeeded", "Failed")
 # equivalent of a Job's ttlSecondsAfterFinished.
 DEFAULT_POD_TTL_SECONDS = 3600
 
+# Where the init container stages a single-file volume. The workload mounts
+# the file out of here with subPath, so this path only ever exists in the
+# init container.
+FILE_STAGING_DIR = Path("/kodman-volumes")
+
 
 def build_pod_manifest(
     options: RunOptions, log: logging.Logger
@@ -91,7 +97,9 @@ def build_pod_manifest(
 
     Returns ``(unique_pod_name, pod_manifest, volumes)`` where ``volumes`` is
     the cache of ``{"src", "dst"}`` mappings the caller later streams into the
-    init container with :func:`cp_k8s`.
+    init container with :func:`cp_k8s`. ``dst`` is the path *inside the init
+    container*, which for a single file is its staging path under
+    :data:`FILE_STAGING_DIR` rather than the path the workload sees.
 
     The pod is labelled ``app.kubernetes.io/managed-by=kodman`` so that
     :meth:`Backend.sweep` can find and reap it once it is finished with.
@@ -175,29 +183,43 @@ def build_pod_manifest(
                 pass
             if not dst.is_absolute():
                 raise ValueError("Destination path must be absolute")
+            if dst == Path("/"):
+                # docker rejects this too; a file would have no name to
+                # stage under and a directory would mount over the root.
+                raise ValueError("Destination path must not be '/'")
             log.info(f"Mount: {src} to {dst}")
+            volume_name = f"shared-data-{i}"
+            workload_mount: dict[str, Any] = {
+                "name": volume_name,
+                "mountPath": str(dst),
+            }
             if src.is_dir():
                 log.debug(f"Volume target {src} is a directory")
-                dst_mount = dst
+                # The whole emptyDir is the directory, so both containers
+                # mount it at the destination.
+                init_mount_path = dst
+                copy_dst = dst
             else:
                 log.debug(f"Volume target {src} is a file")
-                dst_mount = dst.parent
-                if dst_mount == Path("/"):
-                    raise NotImplementedError(
-                        "Root mounting of files not supported by k8s 'emptyDir'"
-                    )
+                # A file is staged in the emptyDir and the workload mounts it
+                # with subPath, so only the file appears at the destination.
+                # Mounting the emptyDir at the file's parent instead would
+                # hide everything else the image has in that directory, and
+                # any readOnly would cover the whole directory rather than
+                # the file.
+                init_mount_path = FILE_STAGING_DIR / volume_name
+                copy_dst = init_mount_path / dst.name
+                workload_mount["subPath"] = dst.name
 
-            volumes.append({"src": src, "dst": dst})  # cache for later
+            volumes.append({"src": src, "dst": copy_dst})  # cache for later
 
             pod_manifest["spec"]["initContainers"][0]["volumeMounts"].append(
-                {"name": f"shared-data-{i}", "mountPath": str(dst_mount)}
+                {"name": volume_name, "mountPath": str(init_mount_path)}
             )
-            pod_manifest["spec"]["containers"][0]["volumeMounts"].append(
-                {"name": f"shared-data-{i}", "mountPath": str(dst_mount)}
-            )
+            pod_manifest["spec"]["containers"][0]["volumeMounts"].append(workload_mount)
             pod_manifest["spec"]["volumes"].append(
                 {
-                    "name": f"shared-data-{i}",
+                    "name": volume_name,
                     "emptyDir": {},
                 }
             )
@@ -304,6 +326,29 @@ def relax_x509_strict(api_client: client.ApiClient) -> None:
     api_client.rest_client.pool_manager.connection_pool_kw["ssl_context"] = context
 
 
+def get_kube_config_context(name: str | None = None) -> dict[str, str]:
+    """Return the cluster, user and namespace of a kubeconfig context.
+
+    Args:
+        name: the context to describe, or None for the current context.
+    """
+    if name:
+        # Read the merged kubeconfig directly: list_kube_config_contexts()
+        # requires a current-context, which kubectl --context does not.
+        merger = kube_config.KubeConfigMerger(kube_config.KUBE_CONFIG_DEFAULT_LOCATION)
+        merged = cast(dict[str, Any], cast(Any, merger.config).value)
+        selected = next(c.value for c in merged["contexts"] if c["name"] == name)
+    else:
+        _, selected = cast(
+            tuple[list[dict[str, Any]], dict[str, Any]],
+            config.list_kube_config_contexts(),
+        )
+    context = dict(selected["context"])
+    # kubectl treats a context without a namespace as the "default" namespace.
+    context.setdefault("namespace", "default")
+    return context
+
+
 SERVICE_ACCOUNT_DIR = Path("/var/run/secrets/kubernetes.io/serviceaccount")
 
 
@@ -357,22 +402,48 @@ class Backend:
         self._log = log
         self._polling_freq = 1
         self._grace_period = 2  # Is this too aggressive?
+        self._delete_timeout: float = 60
 
-    def connect(self):
+    def _warn(self, message: str):
+        """Report something the user needs to see whatever the log level.
+
+        Outside debug mode the log handler paints the rich status line, which
+        is transient - a warning sent only there is a warning nobody ever
+        reads. Cleanup that quietly fails looks exactly like cleanup that
+        worked, so these go to stderr as well.
+        """
+        self._log.warning(message)
+        print(message, file=sys.stderr)
+
+    def connect(self, context: str | None = None, namespace: str | None = None):
+        """Load credentials and select the context and namespace to run in.
+
+        Args:
+            context: kubeconfig context to use instead of the current one.
+            namespace: namespace to use instead of the context's (or, in
+                cluster, the service account's) namespace.
+        """
         # Load config for user/serviceaccount
         # https://github.com/kubernetes-client/python/issues/1005
         try:
             self._log.info(
                 "Loading kube config for user interaction from outside of cluster"
             )
-            config.load_kube_config()
+            config.load_kube_config(context=context)
             self._log.info("Loaded kube config successfully")
-            self._context = config.list_kube_config_contexts()[1]["context"]
+            self._context = get_kube_config_context(context)
         except config.config_exception.ConfigException:
+            if context:
+                # A named context only exists in a kubeconfig: falling back to
+                # the service account would silently run somewhere else.
+                raise
             self._log.info("Failed to load kube config, trying in-cluster config")
             config.load_incluster_config()
             self._log.info("Loaded in-cluster config successfully")
             self._context = get_incluster_context()
+
+        if namespace:
+            self._context["namespace"] = namespace
 
         self._client = client.CoreV1Api()
         relax_x509_strict(self._client.api_client)
@@ -408,13 +479,13 @@ class Backend:
                 label_selector=MANAGED_BY_SELECTOR,
             )
         except ApiException as e:
-            self._log.warning(f"Could not list pods to sweep: {e}")
+            self._warn(f"Could not list pods to sweep: {e}")
             return []
         if not isinstance(pod_list, V1PodList):  # Runtime type checking
             # Warn rather than raise: a client whose response type moved under
             # us must not take down every run, which is how the pod log stream
             # broke on kubernetes 36.x (issue #51).
-            self._log.warning(f"Unexpected response type to sweep: {type(pod_list)}")
+            self._warn(f"Unexpected response type to sweep: {type(pod_list)}")
             return []
 
         now = datetime.now(UTC)
@@ -441,7 +512,7 @@ class Backend:
                 deleted.append(name)
             except ApiException as e:
                 if e.status != 404:  # Somebody else got there first
-                    self._log.warning(f"Could not sweep pod {name}: {e}")
+                    self._warn(f"Could not sweep pod {name}: {e}")
 
         if deleted:
             self._log.info(f"Swept {len(deleted)} finished pod(s)")
@@ -599,7 +670,14 @@ class Backend:
 
         return unique_pod_name
 
-    def delete(self, options: DeleteOptions):
+    def delete(self, options: DeleteOptions) -> bool:
+        """Delete a pod and wait for it to go, reporting whether it went.
+
+        A cleanup that fails must say so on stderr. Silently swallowing the
+        error - which is what this did - makes a --rm that never removes
+        anything indistinguishable from one that works, and the pods pile up
+        in the namespace with nothing in the CI log to explain why.
+        """
         namespace = self._context["namespace"]
         try:
             exists_resp = self._client.read_namespaced_pod(
@@ -611,6 +689,7 @@ class Backend:
                 namespace=namespace,
                 grace_period_seconds=self._grace_period,
             )
+            waited = 0
             while exists_resp:
                 self._log.info("Awaiting pod cleanup...")
                 try:
@@ -619,12 +698,26 @@ class Backend:
                         namespace=namespace,
                     )
                     time.sleep(1 / self._polling_freq)
+                    # A pod held by a finalizer never 404s, and this used to
+                    # spin on it forever, taking the whole run with it.
+                    waited += 1 / self._polling_freq
+                    if waited >= self._delete_timeout:
+                        self._warn(
+                            f"Pod {options.name} still present "
+                            f"{waited:.0f}s after being deleted"
+                        )
+                        return False
                 except ApiException as e:
                     if e.status == 404:
                         self._log.info(f"Pod {options.name} deleted successfully")
-                        break
+                        return True
                     else:
                         raise e
 
         except ApiException as e:
-            self._log.info(f"Error deleting pod: {e}")
+            # 403 here means the role can create pods but not delete them, so
+            # every --rm has been quietly leaving its pod behind.
+            self._warn(f"Could not delete pod {options.name}: {e}")
+            return False
+
+        return True

@@ -30,6 +30,8 @@ class KodmanEngine(ArgparseEngine):
 
         self.get_env("KODMAN_SERVICE_ACCOUNT", str)
         self.get_env("KODMAN_POD_TTL", int)
+        self.get_env("KODMAN_CONTEXT", str)
+        self.get_env("KODMAN_NAMESPACE", str)
         self._parser.add_argument(
             "-v",
             "--version",
@@ -75,7 +77,10 @@ class Run(Command):
         parser_run.add_argument("args", nargs=argparse.REMAINDER, default=[])
 
     def do(self, args, ctx, env, log):
-        ctx.connect()
+        ctx.connect(
+            context=env.get("KODMAN_CONTEXT") or None,
+            namespace=env.get("KODMAN_NAMESPACE") or None,
+        )
 
         # Reap what earlier runs left behind before adding to the pile.
         ttl = env.get("KODMAN_POD_TTL")
