@@ -46,6 +46,16 @@ that number will oversubscribe whatever `--cpus` allows.
 
 From outside of the cluster `kodman` will use your current Kubernetes context (the same as your current `kubectl` context).
 
+To run somewhere else without switching your `kubectl` context, set
+`KODMAN_CONTEXT` to another context in your kubeconfig and/or
+`KODMAN_NAMESPACE` to another namespace:
+```
+KODMAN_CONTEXT=staging KODMAN_NAMESPACE=ci kodman run --rm ubuntu true
+```
+A context with no namespace uses `default`, as `kubectl` does.
+`KODMAN_NAMESPACE` also applies in-cluster, where the namespace otherwise
+comes from the service account.
+
 From inside the cluster `kodman` will use the serviceAccount mounted by default.
 
 ## Pod cleanup

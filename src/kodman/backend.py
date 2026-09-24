@@ -14,6 +14,7 @@ from kubernetes.client.models.core_v1_event_list import CoreV1EventList
 from kubernetes.client.models.v1_pod import V1Pod
 from kubernetes.client.models.v1_pod_list import V1PodList
 from kubernetes.client.rest import ApiException
+from kubernetes.config import kube_config
 from kubernetes.stream import stream
 from urllib3 import HTTPResponse
 from urllib3.util.ssl_ import create_urllib3_context
@@ -322,6 +323,29 @@ def relax_x509_strict(api_client: client.ApiClient) -> None:
     api_client.rest_client.pool_manager.connection_pool_kw["ssl_context"] = context
 
 
+def get_kube_config_context(name: str | None = None) -> dict[str, str]:
+    """Return the cluster, user and namespace of a kubeconfig context.
+
+    Args:
+        name: the context to describe, or None for the current context.
+    """
+    if name:
+        # Read the merged kubeconfig directly: list_kube_config_contexts()
+        # requires a current-context, which kubectl --context does not.
+        merger = kube_config.KubeConfigMerger(kube_config.KUBE_CONFIG_DEFAULT_LOCATION)
+        merged = cast(dict[str, Any], cast(Any, merger.config).value)
+        selected = next(c.value for c in merged["contexts"] if c["name"] == name)
+    else:
+        _, selected = cast(
+            tuple[list[dict[str, Any]], dict[str, Any]],
+            config.list_kube_config_contexts(),
+        )
+    context = dict(selected["context"])
+    # kubectl treats a context without a namespace as the "default" namespace.
+    context.setdefault("namespace", "default")
+    return context
+
+
 def get_incluster_context():
     ns_path = "/var/run/secrets/kubernetes.io/serviceaccount/namespace"
     context = {}
@@ -355,21 +379,35 @@ class Backend:
         self._log.warning(message)
         print(message, file=sys.stderr)
 
-    def connect(self):
+    def connect(self, context: str | None = None, namespace: str | None = None):
+        """Load credentials and select the context and namespace to run in.
+
+        Args:
+            context: kubeconfig context to use instead of the current one.
+            namespace: namespace to use instead of the context's (or, in
+                cluster, the service account's) namespace.
+        """
         # Load config for user/serviceaccount
         # https://github.com/kubernetes-client/python/issues/1005
         try:
             self._log.info(
                 "Loading kube config for user interaction from outside of cluster"
             )
-            config.load_kube_config()
+            config.load_kube_config(context=context)
             self._log.info("Loaded kube config successfully")
-            self._context = config.list_kube_config_contexts()[1]["context"]
+            self._context = get_kube_config_context(context)
         except config.config_exception.ConfigException:
+            if context:
+                # A named context only exists in a kubeconfig: falling back to
+                # the service account would silently run somewhere else.
+                raise
             self._log.info("Failed to load kube config, trying in-cluster config")
             config.load_incluster_config()
             self._log.info("Loaded in-cluster config successfully")
             self._context = get_incluster_context()
+
+        if namespace:
+            self._context["namespace"] = namespace
 
         self._client = client.CoreV1Api()
         relax_x509_strict(self._client.api_client)
