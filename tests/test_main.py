@@ -5,6 +5,7 @@ import signal
 import pytest
 
 from kodman.__main__ import RunInterruptedError, engine
+from kodman.backend import DEFAULT_RUN_TIMEOUT_SECONDS, PodNotReadyError
 
 # `@engine.add_command` registers an instance and rebinds the class name to
 # None, so reach the Run command class via the engine's registry.
@@ -62,6 +63,7 @@ def _args(rm, extra=()):
 _ENV = {
     "KODMAN_SERVICE_ACCOUNT": "",
     "KODMAN_POD_TTL": None,
+    "KODMAN_RUN_TIMEOUT": None,
     "KODMAN_CONTEXT": None,
     "KODMAN_NAMESPACE": None,
 }
@@ -169,3 +171,52 @@ def test_volume_spec_rejects_bad_options_while_parsing(spec, error, capsys):
     with pytest.raises(SystemExit):
         _args(rm=False, extra=["-v", spec])
     assert error in capsys.readouterr().err
+
+
+def test_run_uses_the_default_timeout_without_the_env():
+    class Recorder(FakeBackend):
+        def run(self, options):
+            self.options = options
+            return super().run(options)
+
+    ctx = Recorder()
+    RunCommand().do(_args(rm=True), ctx, _ENV, _log)
+    assert ctx.options.timeout == DEFAULT_RUN_TIMEOUT_SECONDS
+
+
+def test_run_timeout_env_overrides_the_default():
+    class Recorder(FakeBackend):
+        def run(self, options):
+            self.options = options
+            return super().run(options)
+
+    ctx = Recorder()
+    env = {**_ENV, "KODMAN_RUN_TIMEOUT": 30}
+    RunCommand().do(_args(rm=True), ctx, env, _log)
+    assert ctx.options.timeout == 30
+
+
+def test_pod_not_ready_is_reported_cleanly_with_a_nonzero_exit(capsys):
+    # The GOAL this bug fix exists for: give up with a clear error and a
+    # non-zero exit, not a traceback and not a silent hang
+    # (reports/b01-pipeline-hang.md).
+    ctx = FakeBackend(raise_on_run=PodNotReadyError("Pod x did not become ready"))
+    command = RunCommand()
+    command.do(_args(rm=False), ctx, _ENV, _log)
+    assert command.exit_code == 1
+    assert "Pod x did not become ready" in capsys.readouterr().err
+
+
+def test_pod_not_ready_without_rm_leaves_the_pod_for_inspection():
+    # Unlike an interrupted run, a pod that never became ready is not yet
+    # doing any real work - worth leaving behind to diagnose, same as any
+    # other failed run, unless --rm was asked for.
+    ctx = FakeBackend(raise_on_run=PodNotReadyError("Pod x did not become ready"))
+    RunCommand().do(_args(rm=False), ctx, _ENV, _log)
+    assert ctx.deleted == []
+
+
+def test_pod_not_ready_with_rm_still_cleans_up():
+    ctx = FakeBackend(raise_on_run=PodNotReadyError("Pod x did not become ready"))
+    RunCommand().do(_args(rm=True), ctx, _ENV, _log)
+    assert ctx.deleted == ["kodman-run-123"]

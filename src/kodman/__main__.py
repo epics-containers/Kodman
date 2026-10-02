@@ -5,8 +5,10 @@ import sys
 from . import __version__
 from .backend import (
     DEFAULT_POD_TTL_SECONDS,
+    DEFAULT_RUN_TIMEOUT_SECONDS,
     Backend,
     DeleteOptions,
+    PodNotReadyError,
     RunOptions,
     SweepOptions,
     parse_volume_options,
@@ -31,6 +33,7 @@ class KodmanEngine(ArgparseEngine):
 
         self.get_env("KODMAN_SERVICE_ACCOUNT", str)
         self.get_env("KODMAN_POD_TTL", int)
+        self.get_env("KODMAN_RUN_TIMEOUT", int)
         self.get_env("KODMAN_CONTEXT", str)
         self.get_env("KODMAN_NAMESPACE", str)
         self._parser.add_argument(
@@ -120,6 +123,7 @@ class Run(Command):
         log.debug(f"Args: {k8s_args}")
 
         service_a = env["KODMAN_SERVICE_ACCOUNT"]
+        timeout = env.get("KODMAN_RUN_TIMEOUT")
         options = RunOptions(
             image=args.image,
             command=k8s_command,
@@ -127,6 +131,7 @@ class Run(Command):
             volumes=args.volume,
             service_account=service_a if service_a else "",
             cpus=args.cpus if args.cpus else "",
+            timeout=DEFAULT_RUN_TIMEOUT_SECONDS if timeout is None else timeout,
         )
 
         def _on_signal(signum, _frame):
@@ -150,6 +155,12 @@ class Run(Command):
             interrupted = True
             self.exit_code = 128 + interrupt.signum  # Shell convention
             print(f"Interrupted, removing pod {ctx.pod_name}", file=sys.stderr)
+        except PodNotReadyError as timed_out:
+            # A clear, one-line failure instead of letting the client (and
+            # whatever CI job owns it) block until an external deadline
+            # fires - see reports/b01-pipeline-hang.md.
+            self.exit_code = 1
+            print(str(timed_out), file=sys.stderr)
         finally:
             # Restore first: a second Ctrl-C during cleanup should kill kodman
             # outright rather than re-enter this handler.

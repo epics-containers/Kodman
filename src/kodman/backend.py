@@ -22,6 +22,13 @@ from kubernetes.stream import stream
 from urllib3 import HTTPResponse
 from urllib3.util.ssl_ import create_urllib3_context
 
+# How long run() waits for a pod to become ready (init container started,
+# then phase leaving Pending) before giving up. Comfortably longer than a
+# slow image pull (minutes, not seconds) but far short of a CI job's
+# hour-scale budget, so one stuck pod fails its own step instead of silently
+# consuming the whole job (reports/b01-pipeline-hang.md).
+DEFAULT_RUN_TIMEOUT_SECONDS = 600
+
 
 @dataclass(frozen=True)
 class RunOptions:
@@ -31,6 +38,7 @@ class RunOptions:
     volumes: list[str] = field(default_factory=lambda: [])
     service_account: str = field(default_factory=lambda: "")
     cpus: str = field(default_factory=lambda: "")
+    timeout: float = DEFAULT_RUN_TIMEOUT_SECONDS
 
     def __hash__(self):
         hash_candidates = (
@@ -83,6 +91,13 @@ TERMINAL_PHASES = ("Succeeded", "Failed")
 # run reaps it. Without --rm a pod otherwise lives forever: a bare Pod has no
 # equivalent of a Job's ttlSecondsAfterFinished.
 DEFAULT_POD_TTL_SECONDS = 3600
+
+# How often a repeated "still waiting" message is allowed to log again while
+# polling for pod readiness. Without this, the per-second poll loop would
+# print a line every second for the whole timeout window - visible, but a
+# CI log flooded with a thousand near-identical lines is no more readable
+# than one that is silent.
+RUN_LOG_HEARTBEAT_SECONDS = 10
 
 # Where the init container stages a single-file volume. The workload mounts
 # the file out of here with subPath, so this path only ever exists in the
@@ -433,6 +448,17 @@ def get_incluster_context(sa_dir: Path = SERVICE_ACCOUNT_DIR) -> dict[str, str]:
     return context
 
 
+class PodNotReadyError(TimeoutError):
+    """A pod did not become ready to run within its timeout.
+
+    Raised by :meth:`Backend.run` instead of polling the Kubernetes API
+    forever: with no client-side bound, a pod that never schedules or never
+    leaves ``Pending`` (and never produces a Warning Event - an ordinary
+    stalled image pull does not) used to block ``run()`` until an external
+    deadline killed the whole process (reports/b01-pipeline-hang.md).
+    """
+
+
 class Backend:
     def __init__(self, log):
         self.return_code = 0
@@ -568,10 +594,20 @@ class Backend:
 
         self._log.debug(f"Pod manifest = {pod_manifest}")
 
-        # Schedule pod and block until ready
+        # Schedule pod and block until ready. One deadline covers both this
+        # wait and the Pending-phase wait below: together they are "the pod
+        # becoming ready to run", not two independent budgets.
         self._log.info(f"Creating pod: {unique_pod_name}")
         self._client.create_namespaced_pod(body=pod_manifest, namespace=namespace)
+        ready_deadline = time.monotonic() + options.timeout
+        last_heartbeat = time.monotonic() - RUN_LOG_HEARTBEAT_SECONDS
         while True:
+            if time.monotonic() > ready_deadline:
+                raise PodNotReadyError(
+                    f"Pod {unique_pod_name} did not become ready within "
+                    f"{options.timeout:.0f}s: its init container never "
+                    "started"
+                )
             read_resp = self._client.read_namespaced_pod(
                 name=unique_pod_name, namespace=namespace
             )
@@ -587,7 +623,10 @@ class Backend:
             else:
                 raise TypeError("Unexpected response type")
 
-            self._log.info("Awaiting init container...")
+            now = time.monotonic()
+            if now - last_heartbeat >= RUN_LOG_HEARTBEAT_SECONDS:
+                self._log.info("Awaiting init container...")
+                last_heartbeat = now
             time.sleep(1 / self._polling_freq)
 
         # Fill volumes
@@ -622,6 +661,11 @@ class Backend:
         )
 
         while True:
+            if time.monotonic() > ready_deadline:
+                raise PodNotReadyError(
+                    f"Pod {unique_pod_name} did not become ready within "
+                    f"{options.timeout:.0f}s: its phase never left Pending"
+                )
             read_resp = self._client.read_namespaced_pod(
                 name=unique_pod_name, namespace=namespace
             )
@@ -631,7 +675,10 @@ class Backend:
                 elif read_resp.status.phase != "Pending":
                     self._log.info(f"Pod status: {read_resp.status.phase}")
                     break
-                self._log.info(f"Pod status: {read_resp.status.phase}")
+                now = time.monotonic()
+                if now - last_heartbeat >= RUN_LOG_HEARTBEAT_SECONDS:
+                    self._log.info(f"Pod status: {read_resp.status.phase}")
+                    last_heartbeat = now
                 time.sleep(1 / self._polling_freq)
                 events = self._client.list_namespaced_event(
                     namespace=namespace,
