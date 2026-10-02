@@ -45,9 +45,22 @@ class ArgparseEngine:
             handler.setFormatter(formatter)
             self._log.addHandler(handler)
             self._log.setLevel("DEBUG")
-        else:
+        elif self._console.is_terminal:
             self._status = self._console.status("Initializing application...")
             handler = ConsoleOutputHandler(self._status)
+            self._log.addHandler(handler)
+            self._log.setLevel("INFO")
+        else:
+            # Console.status() is a live spinner: off a real terminal (a CI
+            # job's log, a file redirect) Rich renders it as nothing at all,
+            # so every .info() progress line was silently dropped - the only
+            # symptom of a run stuck waiting on the cluster was a log with no
+            # output whatsoever (reports/b01-pipeline-hang.md). A CI log is
+            # read after the fact, not watched live, so plain lines on
+            # stderr are what makes it visible there.
+            formatter = logging.Formatter("%(message)s")
+            handler = logging.StreamHandler()
+            handler.setFormatter(formatter)
             self._log.addHandler(handler)
             self._log.setLevel("INFO")
 

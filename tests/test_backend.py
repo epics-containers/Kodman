@@ -3,6 +3,18 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import pytest
+from kubernetes.client.models.core_v1_event_list import CoreV1EventList
+from kubernetes.client.models.v1_container_state import V1ContainerState
+from kubernetes.client.models.v1_container_state_running import (
+    V1ContainerStateRunning,
+)
+from kubernetes.client.models.v1_container_state_terminated import (
+    V1ContainerStateTerminated,
+)
+from kubernetes.client.models.v1_container_state_waiting import (
+    V1ContainerStateWaiting,
+)
+from kubernetes.client.models.v1_container_status import V1ContainerStatus
 from kubernetes.client.models.v1_object_meta import V1ObjectMeta
 from kubernetes.client.models.v1_pod import V1Pod
 from kubernetes.client.models.v1_pod_list import V1PodList
@@ -10,11 +22,13 @@ from kubernetes.client.models.v1_pod_status import V1PodStatus
 from kubernetes.client.rest import ApiException
 
 from kodman.backend import (
+    INIT_CONTAINER_NAME,
     MANAGED_BY_LABEL,
     MANAGED_BY_SELECTOR,
     MANAGED_BY_VALUE,
     Backend,
     DeleteOptions,
+    PodNotReadyError,
     RunOptions,
     SweepOptions,
     _iter_log_lines,
@@ -230,6 +244,12 @@ class FakeStreamResponse:
     def stream(self, amt=None, decode_content=False):
         yield from self._chunks
 
+    def close(self):
+        pass
+
+    def release_conn(self):
+        pass
+
 
 def test_iter_log_lines_splits_on_newlines():
     resp = FakeStreamResponse([b"line one\nline two\n"])
@@ -403,3 +423,147 @@ def test_volume_ro_on_a_file_covers_only_the_file(tmp_path):
             "readOnly": True,
         }
     ]
+
+
+def _container_status(name, *, running=None, terminated=None, waiting=None):
+    return V1ContainerStatus(
+        name=name,
+        image="i",
+        image_id="",
+        ready=terminated is None and running is not None,
+        restart_count=0,
+        started=running is not None or terminated is not None,
+        state=V1ContainerState(running=running, terminated=terminated, waiting=waiting),
+    )
+
+
+def _run_pod(phase, *, init_running=False, terminated_exit_code=None):
+    """Build a V1Pod covering the three states run() cares about:
+
+    not yet running its init container, Pending/Running with no terminated
+    workload container yet, or with the workload container terminated.
+    """
+    init_status = _container_status(
+        INIT_CONTAINER_NAME,
+        running=V1ContainerStateRunning() if init_running else None,
+        waiting=None if init_running else V1ContainerStateWaiting(),
+    )
+    container_statuses = None
+    if terminated_exit_code is not None:
+        container_statuses = [
+            _container_status(
+                "kodman-exec",
+                terminated=V1ContainerStateTerminated(exit_code=terminated_exit_code),
+            )
+        ]
+    return V1Pod(
+        status=V1PodStatus(
+            phase=phase,
+            init_container_statuses=[init_status],
+            container_statuses=container_statuses,
+        )
+    )
+
+
+class FakeRunApi:
+    """Stands in for CoreV1Api over every call run() makes.
+
+    ``pods`` is the sequence of read_namespaced_pod responses: each call
+    pops the next one, except the last, which repeats forever - so a short
+    list can still answer a loop that polls until a deadline raises.
+    """
+
+    def __init__(self, pods, events=None, log_chunks=None):
+        self._pods = list(pods)
+        self.events = events or []
+        self._log_chunks = log_chunks or []
+        self.created: list[dict] = []
+        self.read_count = 0
+
+    def create_namespaced_pod(self, body, namespace):
+        self.created.append(body)
+
+    def read_namespaced_pod(self, name, namespace):
+        self.read_count += 1
+        if len(self._pods) > 1:
+            return self._pods.pop(0)
+        return self._pods[0]
+
+    def list_namespaced_event(self, namespace, field_selector):
+        return CoreV1EventList(items=self.events)
+
+    def read_namespaced_pod_log(self, name, namespace, follow, _preload_content):
+        return FakeStreamResponse(self._log_chunks)
+
+    def connect_get_namespaced_pod_exec(self, *args, **kwargs):
+        # Only ever passed to the mocked kodman.backend.stream as a bound
+        # method reference, never actually called.
+        raise AssertionError("not meant to be called directly")
+
+
+def _run_backend(api):
+    backend = _backend(api)
+    backend._polling_freq = 1000  # Don't really wait a timeout window
+    return backend
+
+
+def test_run_times_out_waiting_for_init_container():
+    # The init container never reports running (e.g. stalled image pull) and
+    # no Warning Event is ever raised for it - the bug that let one stuck
+    # pod eat a CI job's whole hour (reports/b01-pipeline-hang.md).
+    api = FakeRunApi(pods=[_run_pod("Pending", init_running=False)])
+    backend = _run_backend(api)
+    with pytest.raises(PodNotReadyError, match="init container"):
+        backend.run(RunOptions(image="busybox", timeout=0.05))
+    assert api.read_count > 1  # actually polled, not a one-shot check
+
+
+def test_run_times_out_waiting_to_leave_pending(mocker):
+    # Init container starts fine, but the pod itself never schedules and
+    # never gets a Warning Event either - an ordinary stalled/slow schedule
+    # is invisible to the old Warning-only early exit.
+    mocker.patch("kodman.backend.stream")
+    api = FakeRunApi(
+        pods=[
+            _run_pod("Pending", init_running=True),
+            _run_pod("Pending", init_running=True),
+        ]
+    )
+    backend = _run_backend(api)
+    with pytest.raises(PodNotReadyError, match="Pending"):
+        backend.run(RunOptions(image="busybox", timeout=0.05))
+
+
+def test_run_normal_path_is_unchanged(mocker, capsys):
+    # The happy path: init container starts, pod leaves Pending straight
+    # away, logs stream, the workload container has already terminated by
+    # the time run() checks - the timeout must never fire on this path.
+    mocker.patch("kodman.backend.stream")
+    api = FakeRunApi(
+        pods=[
+            _run_pod("Pending", init_running=True),
+            _run_pod("Running", init_running=True),
+            _run_pod("Running", init_running=True, terminated_exit_code=0),
+        ],
+        log_chunks=[b"hello\n"],
+    )
+    backend = _run_backend(api)
+    pod_name = backend.run(RunOptions(image="busybox"))  # default timeout
+    assert pod_name == backend.pod_name
+    assert backend.return_code == 0
+    assert len(api.created) == 1
+    assert "hello" in capsys.readouterr().out
+
+
+def test_run_normal_path_propagates_a_failing_exit_code(mocker):
+    mocker.patch("kodman.backend.stream")
+    api = FakeRunApi(
+        pods=[
+            _run_pod("Running", init_running=True),
+            _run_pod("Running", init_running=True),
+            _run_pod("Running", init_running=True, terminated_exit_code=3),
+        ]
+    )
+    backend = _run_backend(api)
+    backend.run(RunOptions(image="busybox"))
+    assert backend.return_code == 3
